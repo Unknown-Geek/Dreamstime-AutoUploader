@@ -288,6 +288,11 @@ class DreamstimeBot:
             # Wait for navigation or login completion
             self.page.wait_for_timeout(5000)
             
+            # Check for bot protection (Press & Hold button) after login
+            self.log_progress(4, "Checking for bot protection challenge...", "info")
+            self.handle_bot_protection()
+            self.page.wait_for_timeout(2000)
+            
             # Check if we landed on securelogin page
             if "securelogin" in self.page.url:
                 self.log_progress(4, "Security verification page detected - please complete manually", "warning")
@@ -526,10 +531,25 @@ class DreamstimeBot:
                                 ai_result = self.gemini_analyzer.analyze_image(tmp_path)
                                 
                                 if ai_result:
-                                    # Fill in generated title and description
-                                    title_field.fill(ai_result['title'])
-                                    description_field.fill(ai_result['description'])
-                                    description_field.dispatch_event("input")
+                                    # Fill in generated title and description using JavaScript
+                                    self.page.evaluate(f"""
+                                        const titleField = document.querySelector('input#title');
+                                        const descField = document.querySelector('textarea#description');
+                                        
+                                        if (titleField) {{
+                                            titleField.focus();
+                                            titleField.value = {repr(ai_result['title'])};
+                                            titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                            titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                        }}
+                                        
+                                        if (descField) {{
+                                            descField.focus();
+                                            descField.value = {repr(ai_result['description'])};
+                                            descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                            descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                        }}
+                                    """)
                                     safe_wait(self.page, 1000, self.state.is_stop_requested)
                                     
                                     self.log_progress(7, f"AI generated: {ai_result['title'][:40]}...", "success")
@@ -556,13 +576,40 @@ class DreamstimeBot:
                     if self.same_id_action == "stop":
                         return "stop"
                     return "skip"
+            # Copy description to title if title is empty (since description filling works)
+            if not title_text or not title_text.strip():
+                # Get the description value that was successfully filled
+                current_desc = self.page.evaluate("document.querySelector('textarea#description')?.value || ''")
+                if current_desc:
+                    title_text = current_desc
+                    self.log_progress(7, "Copied description to title field", "info")
+            
             # Sanitize title (remove colons, limit to 115 chars)
             if title_text:
-                safe_wait(self.page, 500, self.state.is_stop_requested)
                 sanitized_title = sanitize_title(title_text)
-                title_field.fill("")
-                title_field.type(sanitized_title, delay=50)
-                safe_wait(self.page, 500, self.state.is_stop_requested)
+                
+                # Use the same approach that works for description
+                self.page.evaluate(f"""
+                    const descField = document.querySelector('textarea#description');
+                    const titleField = document.querySelector('input#title');
+                    
+                    if (titleField && descField) {{
+                        // Set title to sanitized description
+                        titleField.value = {repr(sanitized_title)};
+                        
+                        // Trigger the same events that work for description
+                        const inputEvent = new Event('input', {{ bubbles: true, cancelable: true }});
+                        const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+                        
+                        titleField.dispatchEvent(inputEvent);
+                        titleField.dispatchEvent(changeEvent);
+                        
+                        // Also manually trigger any attached event listeners
+                        if (titleField.oninput) titleField.oninput(inputEvent);
+                        if (titleField.onchange) titleField.onchange(changeEvent);
+                    }}
+                """)
+                safe_wait(self.page, 1500, self.state.is_stop_requested)
                 self.log_progress(7, f"Title set: {sanitized_title[:50]}...", "info")
             
             # Enhance description with manual text if provided
