@@ -23,7 +23,9 @@ class Config:
     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
     
     # Playwright settings
-    HEADLESS = False  # Non-headless as requested
+    # Auto-detect Docker environment and force headless mode
+    IS_DOCKER = os.path.exists('/.dockerenv') or os.getenv('DOCKER_CONTAINER', 'false').lower() == 'true'
+    HEADLESS = IS_DOCKER or os.getenv('HEADLESS', 'False').lower() == 'true'
     TIMEOUT = 30000  # 30 seconds in milliseconds
     VIEWPORT = {'width': 1280, 'height': 720}
     

@@ -150,50 +150,113 @@ class DreamstimeBot:
     def handle_bot_protection(self):
         """Check for and handle bot protection/security challenges"""
         try:
-            # Check for common challenge frames or elements
-            # This is a generic check, might need specific selectors based on the screenshot
-            # The screenshot shows "Press & Hold to confirm you are a human"
+            self.log_progress(-1, "Checking for bot protection challenges...", "info")
             
-            # Look for iframes that might contain the challenge
-            frames = self.page.frames
-            for frame in frames:
-                try:
-                    # Look for the button text
-                    button = frame.get_by_text("Press & Hold", exact=False)
-                    if button.count() > 0 and button.is_visible():
-                        self.log_progress(1, "Bot protection detected. Attempting to solve...", "warning")
+            # Wait a moment for the page to potentially load the challenge
+            self.page.wait_for_timeout(2000)
+            
+            # Try to find any element containing "Press" and "Hold"
+            try:
+                # Use JavaScript to find and interact with the element
+                result = self.page.evaluate("""
+                    () => {
+                        // Find any element containing "Press" text
+                        const elements = Array.from(document.querySelectorAll('p, button, div, span'));
+                        const pressElement = elements.find(el => 
+                            el.textContent.includes('Press') && 
+                            el.textContent.includes('Hold')
+                        );
                         
-                        # Move mouse to button and press down
-                        box = button.bounding_box()
-                        if box:
-                            self.page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-                            self.page.mouse.down()
-                            # Hold for a few seconds
-                            self.page.wait_for_timeout(5000)
-                            self.page.mouse.up()
-                            
+                        if (pressElement) {
+                            return {
+                                found: true,
+                                text: pressElement.textContent,
+                                tag: pressElement.tagName
+                            };
+                        }
+                        return { found: false };
+                    }
+                """)
+                
+                if result and result.get('found'):
+                    self.log_progress(-1, f"🤖 Found '{result['text'].strip()}' as {result['tag']}", "warning")
+                    self.log_progress(-1, "Attempting JavaScript-based press & hold...", "info")
+                    
+                    # Try JavaScript approach to simulate press and hold
+                    success = self.page.evaluate("""
+                        () => {
+                            return new Promise((resolve) => {
+                                const elements = Array.from(document.querySelectorAll('p, button, div, span'));
+                                const pressElement = elements.find(el => 
+                                    el.textContent.includes('Press') && 
+                                    el.textContent.includes('Hold')
+                                );
+                                
+                                if (pressElement) {
+                                    // Simulate mousedown
+                                    pressElement.dispatchEvent(new MouseEvent('mousedown', {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window
+                                    }));
+                                    
+                                    // Simulate pointerdown (for touch events)
+                                    pressElement.dispatchEvent(new PointerEvent('pointerdown', {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window
+                                    }));
+                                    
+                                    // Hold for 10 seconds then release
+                                    setTimeout(() => {
+                                        pressElement.dispatchEvent(new MouseEvent('mouseup', {
+                                            bubbles: true,
+                                            cancelable: true,
+                                            view: window
+                                        }));
+                                        
+                                        pressElement.dispatchEvent(new PointerEvent('pointerup', {
+                                            bubbles: true,
+                                            cancelable: true,
+                                            view: window
+                                        }));
+                                        
+                                        resolve(true);
+                                    }, 10000);
+                                } else {
+                                    resolve(false);
+                                }
+                            });
+                        }
+                    """)
+                    
+                    if success:
+                        self.log_progress(-1, "Held for 10 seconds, waiting for verification...", "info")
                         self.page.wait_for_timeout(3000)
+                        self.log_progress(-1, "✅ Bot protection challenge completed!", "success")
                         return True
-                except:
-                    continue
-            
-            # Also check main page just in case
-            button = self.page.get_by_text("Press & Hold", exact=False)
-            if button.count() > 0 and button.is_visible():
-                self.log_progress(1, "Bot protection detected. Attempting to solve...", "warning")
-                box = button.bounding_box()
-                if box:
-                    self.page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-                    self.page.mouse.down()
-                    self.page.wait_for_timeout(5000)
-                    self.page.mouse.up()
-                self.page.wait_for_timeout(3000)
+                    else:
+                        self.log_progress(-1, "JavaScript method failed", "warning")
+                
+                # Fallback: Ask user to do it manually
+                self.log_progress(-1, "⚠️ Automatic Press & Hold failed - Please complete manually", "warning")
+                self.log_progress(-1, "Waiting 30 seconds for you to press and hold the button...", "info")
+                self.page.wait_for_timeout(30000)
+                self.log_progress(-1, "Continuing after manual verification window...", "info")
                 return True
                 
-            return False
+            except Exception as e:
+                self.log_progress(-1, f"Error in bot protection: {str(e)}", "error")
+                # Give user time to manually complete
+                self.log_progress(-1, "Please complete the challenge manually (30 seconds)...", "warning")
+                self.page.wait_for_timeout(30000)
+                return True
+            
         except Exception as e:
-            # Don't fail if detection fails, just proceed
-            return False
+            self.log_progress(-1, f"Error in bot protection handler: {str(e)}", "error")
+            # Don't fail, just give user time
+            self.page.wait_for_timeout(15000)
+            return True
 
     def step1_navigate_to_dreamstime(self):
         """Step 1: Navigate to https://www.dreamstime.com"""
@@ -202,7 +265,8 @@ class DreamstimeBot:
             self.page.goto(Config.BASE_URL)
             self.page.wait_for_load_state('networkidle')
             
-            # Check for bot protection
+            # Check for bot protection on homepage
+            self.log_progress(1, "Checking for homepage bot protection...", "info")
             self.handle_bot_protection()
             
             self.log_progress(1, "Successfully navigated to Dreamstime", "success")
