@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dreamstime Automation Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <header class="header">
+            <h1 class="title">Dreamstime Automation Bot</h1>
+            <div class="status-indicator">
+                Status: <span id="connectionStatus" class="status-connected">Connected</span>
+            </div>
+        </header>
+
+        <div class="card">
+            <h2 class="section-title">Automation Options</h2>
+
+            <div class="options-grid">
+                <!-- Template Selection -->
+                <div class="option-group">
+                    <label>Description Template:</label>
+                    <div class="info-box">
+                        <span class="icon">✨</span>
+                        <span><strong>Professional Mode Active</strong><br>Gemini AI will automatically analyze images
+                            and generate professional titles and descriptions.</span>
+                    </div>
+                </div>
+
+                <!-- Manual Description -->
+                <div class="option-group full-width">
+                    <label for="manualDescription">Additional Description (Optional):</label>
+                    <textarea id="manualDescription" class="form-control" rows="2"
+                        placeholder="Text to append to all descriptions..."></textarea>
+                </div>
+
+                <!-- AI Generated -->
+                <div class="option-group">
+                    <label>AI Generated Image:</label>
+                    <div class="radio-group">
+                        <label>
+                            <input type="radio" name="aiImage" value="no">
+                            <span>No</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="aiImage" value="yes" checked>
+                            <span>Yes</span>
+                        </label>
+                    </div>
+                    <small>Auto-categorize as AI generated</small>
+                </div>
+
+                <!-- Model Release -->
+                <div class="option-group">
+                    <label>Model Release:</label>
+                    <div class="radio-group">
+                        <label>
+                            <input type="radio" name="modelRelease" value="no" checked>
+                            <span>No</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="modelRelease" value="yes">
+                            <span>Yes</span>
+                        </label>
+                    </div>
+                    <small>Add first model release</small>
+                </div>
+
+                <!-- Exclusive Image -->
+                <div class="option-group">
+                    <label>Exclusive Image:</label>
+                    <div class="radio-group">
+                        <label>
+                            <input type="radio" name="exclusiveImage" value="no" checked>
+                            <span>No</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="exclusiveImage" value="yes">
+                            <span>Yes</span>
+                        </label>
+                    </div>
+                    <small>Mark images as exclusive</small>
+                </div>
+
+                <!-- Delay Speed -->
+                <div class="option-group">
+                    <label>Processing Speed:</label>
+                    <div class="radio-group">
+                        <label>
+                            <input type="radio" name="delay" value="fast" checked>
+                            <span>Fast (1-5s)</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="delay" value="slow">
+                            <span>Slow (10-16s)</span>
+                        </label>
+                    </div>
+                    <small>Delay between image submissions</small>
+                </div>
+
+                <!-- Repeat Count -->
+                <div class="option-group">
+                    <label for="repeatCount">Number of Images:</label>
+                    <input type="number" id="repeatCount" class="form-control" value="999" min="1" max="1000">
+                    <small>How many images to process</small>
+                </div>
+
+                <!-- Pause Settings -->
+                <div class="option-group">
+                    <label for="pauseAfter">Pause After (images):</label>
+                    <input type="number" id="pauseAfter" class="form-control" value="0" min="0" max="50">
+                    <small>0 = no pause</small>
+                </div>
+
+                <div class="option-group">
+                    <label for="pauseDuration">Pause Duration (seconds):</label>
+                    <input type="number" id="pauseDuration" class="form-control" value="60" min="10" max="600">
+                    <small>How long to pause</small>
+                </div>
+
+                <!-- Same ID Action -->
+                <div class="option-group">
+                    <label>Duplicate Image Action:</label>
+                    <div class="radio-group">
+                        <label>
+                            <input type="radio" name="sameIdAction" value="skip" checked>
+                            <span>Skip</span>
+                        </label>
+                        <label>
+                            <input type="radio" name="sameIdAction" value="stop">
+                            <span>Stop</span>
+                        </label>
+                    </div>
+                    <small>What to do with duplicate IDs</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Panel -->
+        <div class="control-panel">
+            <button id="startBtn" class="btn btn-primary">
+                <span class="btn-icon">▶</span>
+                Start Automation
+            </button>
+            <button id="stopBtn" class="btn btn-danger" disabled>
+                <span class="btn-icon">⏹</span>
+                Stop
+            </button>
+            <div id="statusBadge" class="status-badge status-idle">
+                <span class="status-dot"></span>
+                <span id="statusText">Idle</span>
+            </div>
+        </div>
+
+        <!-- Progress Container -->
+        <div class="progress-container">
+            <h2 class="section-title">Progress</h2>
+            <div id="progressList" class="progress-list">
+                <div class="empty-state">Ready to start automation</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusBadge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        const progressList = document.getElementById('progressList');
+
+        let pollingInterval = null;
+        let isRunning = false;
+
+        // Status badge classes
+        const statusClasses = {
+            idle: 'status-idle',
+            running: 'status-running',
+            success: 'status-success',
+            error: 'status-error',
+            completed: 'status-completed',
+            failed: 'status-failed',
+            warning: 'status-warning'
+        };
+
+        function updateStatusBadge(status) {
+            // Remove all status classes
+            Object.values(statusClasses).forEach(cls => {
+                statusBadge.classList.remove(cls);
+            });
+
+            // Add new status class
+            statusBadge.classList.add(statusClasses[status] || statusClasses.idle);
+
+            // Update status text
+            const statusTexts = {
+                idle: 'Idle',
+                running: 'Running',
+                info: 'Running',
+                success: 'Success',
+                error: 'Error',
+                completed: 'Completed',
+                failed: 'Failed',
+                warning: 'Stopped'
+            };
+            statusText.textContent = statusTexts[status] || 'Unknown';
+        }
+
+        function createProgressItem(step, message, status) {
+            const item = document.createElement('div');
+            item.className = `progress-item progress-item-${status}`;
+
+            const icon = {
+                info: 'ℹ️',
+                success: '✅',
+                error: '❌',
+                warning: '⚠️'
+            }[status] || 'ℹ️';
+
+            const timestamp = new Date().toLocaleTimeString();
+
+            item.innerHTML = `
+                <span class="progress-icon">${icon}</span>
+                <div class="progress-content">
+                    <span class="progress-step">Step ${step >= 0 ? step : 'Final'}</span>
+                    <span class="progress-message">${message}</span>
+                    <span class="progress-time">${timestamp}</span>
+                </div>
+            `;
+
+            return item;
+        }
+
+        function updateProgress(progressData) {
+            // Clear empty state
+            const emptyState = progressList.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            // Clear and rebuild progress list
+            progressList.innerHTML = '';
+
+            progressData.forEach(item => {
+                const progressItem = createProgressItem(item.step, item.message, item.status);
+                progressList.appendChild(progressItem);
+            });
+
+            // Scroll to bottom
+            progressList.scrollTop = progressList.scrollHeight;
+        }
+
+        function getOptions() {
+            return {
+                template: 'template1', // Always use professional template
+                manualDescription: document.getElementById('manualDescription').value,
+                modelRelease: document.querySelector('input[name="modelRelease"]:checked').value,
+                exclusiveImage: document.querySelector('input[name="exclusiveImage"]:checked').value,
+                aiImage: document.querySelector('input[name="aiImage"]:checked').value,
+                delay: document.querySelector('input[name="delay"]:checked').value,
+                repeatCount: parseInt(document.getElementById('repeatCount').value) || 1,
+                pauseAfter: parseInt(document.getElementById('pauseAfter').value) || 0,
+                pauseDuration: parseInt(document.getElementById('pauseDuration').value) || 60,
+                sameIdAction: document.querySelector('input[name="sameIdAction"]:checked').value
+            };
+        }
+
+        async function startAutomation() {
+            try {
+                const options = getOptions();
+
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                startBtn.innerHTML = '<span class="btn-icon">⏳</span> Starting...';
+
+                const response = await fetch('/start', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(options)
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    isRunning = true;
+                    updateStatusBadge('running');
+                    startPolling();
+                } else {
+                    alert('Error: ' + data.message);
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                    startBtn.innerHTML = '<span class="btn-icon">▶</span> Start Automation';
+                }
+
+            } catch (error) {
+                console.error('Failed to start automation:', error);
+                alert('Failed to start automation: ' + error.message);
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                startBtn.innerHTML = '<span class="btn-icon">▶</span> Start Automation';
+            }
+        }
+
+        async function stopAutomation() {
+            try {
+                stopBtn.disabled = true;
+                stopBtn.innerHTML = '<span class="btn-icon">⏳</span> Stopping...';
+
+                const response = await fetch('/stop', {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (!data.success) {
+                    alert('Error: ' + data.message);
+                    stopBtn.disabled = false;
+                    stopBtn.innerHTML = '<span class="btn-icon">⏹</span> Stop';
+                }
+
+            } catch (error) {
+                console.error('Failed to stop automation:', error);
+                alert('Failed to stop automation: ' + error.message);
+                stopBtn.disabled = false;
+                stopBtn.innerHTML = '<span class="btn-icon">⏹</span> Stop';
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                if (data.progress && data.progress.length > 0) {
+                    updateProgress(data.progress);
+                }
+
+                updateStatusBadge(data.status);
+
+                if (!data.running && isRunning) {
+                    // Automation has finished
+                    isRunning = false;
+                    stopPolling();
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                    startBtn.innerHTML = '<span class="btn-icon">▶</span> Start Automation';
+                    stopBtn.innerHTML = '<span class="btn-icon">⏹</span> Stop';
+
+                    if (data.status === 'completed') {
+                        updateStatusBadge('completed');
+                    } else if (data.status === 'failed' || data.status === 'error') {
+                        updateStatusBadge('error');
+                    }
+                }
+
+            } catch (error) {
+                console.error('Failed to check status:', error);
+            }
+        }
+
+        function startPolling() {
+            if (!pollingInterval) {
+                pollingInterval = setInterval(checkStatus, 1000); // Poll every second
+            }
+        }
+
+        function stopPolling() {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+        }
+
+        // Event listeners
+        startBtn.addEventListener('click', startAutomation);
+        stopBtn.addEventListener('click', stopAutomation);
+
+        // Check initial status on page load
+        checkStatus();
+    </script>
+</body>
+
+</html>
