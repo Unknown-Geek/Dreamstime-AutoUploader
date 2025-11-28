@@ -23,7 +23,7 @@ class GeminiImageAnalyzer:
         
         try:
             genai.configure(api_key=Config.GEMINI_API_KEY)
-            self.model = genai.GenerativeModel('gemini-1.5-flash')
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
             self.enabled = True
             logger.info("Gemini AI initialized successfully")
         except Exception as e:
