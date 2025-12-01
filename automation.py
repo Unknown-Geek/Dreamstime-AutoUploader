@@ -1,5 +1,7 @@
 import time
 import logging
+import json
+import os
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from config import Config
 from utils import (
@@ -14,6 +16,9 @@ from gemini_analyzer import GeminiImageAnalyzer
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Cookie file path
+COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'dreamstime_cookies.json')
 
 
 class AutomationState:
@@ -90,463 +95,586 @@ class DreamstimeBot:
             self.progress_callback(step, message, status)
     
     def setup_browser(self):
-        """Initialize Playwright browser with stealth settings"""
+        """Initialize Playwright browser - connect to existing Chrome with remote debugging"""
         try:
-            self.log_progress(0, "Setting up Chromium browser with stealth mode...", "info")
+            self.log_progress(0, "Connecting to existing Chrome session...", "info")
             
             self.playwright = sync_playwright().start()
             
-            # Launch browser with anti-detection arguments
-            self.browser = self.playwright.chromium.launch(
-                headless=Config.HEADLESS,
-                args=[
-                    '--start-maximized',
-                    '--disable-blink-features=AutomationControlled',  # Hide automation
-                    '--disable-dev-shm-usage',
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                ]
-            )
-            
-            # Create context with stealth settings
-            self.context = self.browser.new_context(
-                viewport=None,  # Disable viewport to allow maximization
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                locale='en-US',
-                timezone_id='America/New_York',
-            )
-            
-            # Inject JavaScript to remove webdriver property and other bot signals
-            self.context.add_init_script("""
-                // Remove webdriver property
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
+            # Connect to Chrome running with --remote-debugging-port=9222
+            try:
+                self.browser = self.playwright.chromium.connect_over_cdp("http://localhost:9222")
+                self.context = self.browser.contexts[0]
                 
-                // Mock plugins
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
+                # Get the active page
+                if len(self.context.pages) > 0:
+                    self.page = self.context.pages[0]
+                else:
+                    self.page = self.context.new_page()
                 
-                // Mock languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en']
-                });
+                self.page.set_default_timeout(Config.TIMEOUT)
                 
-                // Add Chrome runtime
-                window.chrome = { runtime: {} };
-            """)
-            
-            self.page = self.context.new_page()
-            self.page.set_default_timeout(Config.TIMEOUT)
-            
-            self.log_progress(0, "Browser setup complete", "success")
-            return True
+                self.log_progress(0, "✅ Connected to existing Chrome session (already logged in!)", "success")
+                return True
+                
+            except Exception as e:
+                self.log_progress(0, f"Failed to connect to Chrome: {str(e)}", "error")
+                self.log_progress(0, "Please ensure Chrome is running with --remote-debugging-port=9222", "error")
+                return False
             
         except Exception as e:
             self.log_progress(0, f"Failed to setup browser: {str(e)}", "error")
             return False
     
-    def handle_bot_protection(self):
-        """Check for and handle bot protection/security challenges"""
+    def save_cookies(self):
+        """Save cookies to file after successful login"""
         try:
-            self.log_progress(-1, "Checking for bot protection challenges...", "info")
+            cookies = self.context.cookies()
+            with open(COOKIES_FILE, 'w') as f:
+                json.dump(cookies, f, indent=2)
+            self.log_progress(-1, f"✅ Saved {len(cookies)} cookies to {COOKIES_FILE}", "success")
+            return True
+        except Exception as e:
+            self.log_progress(-1, f"Failed to save cookies: {str(e)}", "error")
+            return False
+    
+    def load_cookies(self):
+        """Load cookies from file"""
+        try:
+            if not os.path.exists(COOKIES_FILE):
+                self.log_progress(-1, "No saved cookies found", "info")
+                return False
             
-            # Wait a moment for the page to potentially load the challenge
-            self.page.wait_for_timeout(2000)
+            with open(COOKIES_FILE, 'r') as f:
+                cookies = json.load(f)
             
-            # Try to find any element containing "Press" and "Hold"
+            if not cookies:
+                self.log_progress(-1, "Cookie file is empty", "info")
+                return False
+            
+            self.context.add_cookies(cookies)
+            self.log_progress(-1, f"✅ Loaded {len(cookies)} cookies from file", "success")
+            return True
+        except Exception as e:
+            self.log_progress(-1, f"Failed to load cookies: {str(e)}", "error")
+            return False
+    
+    def is_logged_in(self):
+        """Check if we're currently logged in by looking for logged-in indicators"""
+        try:
+            # Check URL first - if we're on upload/member page, we're likely logged in
+            current_url = self.page.url
+            if "/upload" in current_url or "/member/" in current_url:
+                self.log_progress(-1, f"✅ Logged in (URL check): {current_url}", "info")
+                return True
+            
+            # Check for login form - if present, NOT logged in
+            login_form = self.page.locator("form[name='loginfrm'], input[name='username'], #loginForm")
+            if login_form.count() > 0:
+                self.log_progress(-1, "❌ Login form detected - not logged in", "info")
+                return False
+            
+            # Look for any upload-related elements
+            upload_elements = self.page.locator("a[href*='upload'], .upload-btn, button:has-text('Upload')")
+            if upload_elements.count() > 0:
+                self.log_progress(-1, "✅ Upload button found - logged in", "info")
+                return True
+            
+            # Look for user menu or profile elements
+            user_menu = self.page.locator(".h-user, .user-menu, a.h-user__link")
+            if user_menu.count() > 0:
+                self.log_progress(-1, "✅ User menu found - logged in", "info")
+                return True
+            
+            self.log_progress(-1, "⚠️ Could not determine login status - assuming not logged in", "warning")
+            return False
+        except Exception as e:
+            self.log_progress(-1, f"❌ Error checking login status: {e}", "error")
+            return False
+    
+    def wait_for_manual_login(self, timeout_seconds=300):
+        """Wait for user to manually complete login via VNC viewer"""
+        try:
+            self.log_progress(-1, "=" * 60, "warning")
+            self.log_progress(-1, "🔐 MANUAL LOGIN REQUIRED", "warning")
+            self.log_progress(-1, "=" * 60, "warning")
+            self.log_progress(-1, "Please log in manually using the VNC viewer:", "warning")
+            self.log_progress(-1, "1. Open: https://n8n.shravanpandala.me/vnc/vnc.html", "info")
+            self.log_progress(-1, "2. Complete the login and any captcha challenges", "info")
+            self.log_progress(-1, "3. Make sure you can see the upload button", "info")
+            self.log_progress(-1, f"Waiting up to {timeout_seconds} seconds for login...", "info")
+            self.log_progress(-1, "=" * 60, "warning")
+            
+            # Navigate to Dreamstime login page
+            self.page.goto(Config.BASE_URL)
+            self.page.wait_for_load_state('domcontentloaded')
+            
+            # Try clicking login button if visible
             try:
-                # Use JavaScript to find and interact with the element
-                result = self.page.evaluate("""
-                    () => {
-                        // Find any element containing "Press" text
-                        const elements = Array.from(document.querySelectorAll('p, button, div, span'));
-                        const pressElement = elements.find(el => 
-                            el.textContent.includes('Press') && 
-                            el.textContent.includes('Hold')
-                        );
-                        
-                        if (pressElement) {
-                            return {
-                                found: true,
-                                text: pressElement.textContent,
-                                tag: pressElement.tagName
-                            };
-                        }
-                        return { found: false };
-                    }
-                """)
+                login_btn = self.page.locator("a.h-login__btn--sign-in.js-loginform-trigger")
+                if login_btn.count() > 0:
+                    login_btn.click()
+                    self.page.wait_for_timeout(2000)
+            except:
+                pass
+            
+            # Wait for user to complete login
+            start_time = time.time()
+            check_interval = 5  # Check every 5 seconds
+            
+            while time.time() - start_time < timeout_seconds:
+                # Check if stop requested
+                if self.state.is_stop_requested():
+                    self.log_progress(-1, "Stop requested during manual login", "warning")
+                    return False
                 
-                if result and result.get('found'):
-                    self.log_progress(-1, f"🤖 Found '{result['text'].strip()}' as {result['tag']}", "warning")
-                    self.log_progress(-1, "Attempting JavaScript-based press & hold...", "info")
-                    
-                    # Try JavaScript approach to simulate press and hold
-                    success = self.page.evaluate("""
-                        () => {
-                            return new Promise((resolve) => {
-                                const elements = Array.from(document.querySelectorAll('p, button, div, span'));
-                                const pressElement = elements.find(el => 
-                                    el.textContent.includes('Press') && 
-                                    el.textContent.includes('Hold')
-                                );
-                                
-                                if (pressElement) {
-                                    // Simulate mousedown
-                                    pressElement.dispatchEvent(new MouseEvent('mousedown', {
-                                        bubbles: true,
-                                        cancelable: true,
-                                        view: window
-                                    }));
-                                    
-                                    // Simulate pointerdown (for touch events)
-                                    pressElement.dispatchEvent(new PointerEvent('pointerdown', {
-                                        bubbles: true,
-                                        cancelable: true,
-                                        view: window
-                                    }));
-                                    
-                                    // Hold for 10 seconds then release
-                                    setTimeout(() => {
-                                        pressElement.dispatchEvent(new MouseEvent('mouseup', {
-                                            bubbles: true,
-                                            cancelable: true,
-                                            view: window
-                                        }));
-                                        
-                                        pressElement.dispatchEvent(new PointerEvent('pointerup', {
-                                            bubbles: true,
-                                            cancelable: true,
-                                            view: window
-                                        }));
-                                        
-                                        resolve(true);
-                                    }, 10000);
-                                } else {
-                                    resolve(false);
-                                }
-                            });
-                        }
-                    """)
-                    
-                    if success:
-                        self.log_progress(-1, "Held for 10 seconds, waiting for verification...", "info")
-                        self.page.wait_for_timeout(3000)
-                        self.log_progress(-1, "✅ Bot protection challenge completed!", "success")
-                        return True
-                    else:
-                        self.log_progress(-1, "JavaScript method failed", "warning")
+                self.page.wait_for_timeout(check_interval * 1000)
                 
-                # Fallback: Ask user to do it manually
-                self.log_progress(-1, "⚠️ Automatic Press & Hold failed - Please complete manually", "warning")
-                self.log_progress(-1, "Waiting 30 seconds for you to press and hold the button...", "info")
-                self.page.wait_for_timeout(30000)
-                self.log_progress(-1, "Continuing after manual verification window...", "info")
-                return True
+                # Check if logged in now
+                if self.is_logged_in():
+                    self.log_progress(-1, "✅ Login detected! Saving cookies...", "success")
+                    self.save_cookies()
+                    return True
                 
-            except Exception as e:
-                self.log_progress(-1, f"Error in bot protection: {str(e)}", "error")
-                # Give user time to manually complete
-                self.log_progress(-1, "Please complete the challenge manually (30 seconds)...", "warning")
-                self.page.wait_for_timeout(30000)
-                return True
+                elapsed = int(time.time() - start_time)
+                remaining = timeout_seconds - elapsed
+                self.log_progress(-1, f"⏳ Still waiting for login... ({remaining}s remaining)", "info")
+            
+            self.log_progress(-1, "❌ Manual login timeout - please try again", "error")
+            return False
             
         except Exception as e:
-            self.log_progress(-1, f"Error in bot protection handler: {str(e)}", "error")
-            # Don't fail, just give user time
-            self.page.wait_for_timeout(15000)
-            return True
+            self.log_progress(-1, f"Error during manual login wait: {str(e)}", "error")
+            return False
 
     def step1_navigate_to_dreamstime(self):
-        """Step 1: Navigate to https://www.dreamstime.com"""
+        """Step 1: Navigate to Dreamstime upload page (already logged in)"""
         try:
-            self.log_progress(1, "Navigating to Dreamstime...", "info")
-            self.page.goto(Config.BASE_URL)
-            self.page.wait_for_load_state('networkidle')
+            self.log_progress(1, "Navigating to upload page...", "info")
             
-            # Check for bot protection on homepage
-            self.log_progress(1, "Checking for homepage bot protection...", "info")
-            self.handle_bot_protection()
+            # Navigate to the upload page directly (already logged in via existing Chrome session)
+            self.page.goto("https://www.dreamstime.com/upload")
+            self.page.wait_for_load_state('domcontentloaded')
+            self.page.wait_for_timeout(3000)
             
-            self.log_progress(1, "Successfully navigated to Dreamstime", "success")
-            return True
+            # Verify we're logged in
+            if self.is_logged_in():
+                self.log_progress(1, "✅ On upload page - ready to process images!", "success")
+                return True
+            else:
+                self.log_progress(1, "⚠️ Not logged in - please log in via VNC first", "warning")
+                return False
+            
         except Exception as e:
             self.log_progress(1, f"Navigation failed: {str(e)}", "error")
             return False
     
     def step2_click_signin(self):
-        """Step 2: Click the sign-in button"""
-        try:
-            self.log_progress(2, "Looking for sign-in button...", "info")
-            
-            # Check if we are already on the login page (redirected by bot protection)
-            if "login" in self.page.url or "securelogin" in self.page.url:
-                self.log_progress(2, "Already on login page", "info")
-                return True
-
-            # Click the sign-in button
-            try:
-                self.page.click("a.h-login__btn--sign-in.js-loginform-trigger", timeout=5000)
-            except:
-                # If button not found, maybe we need to handle bot protection again
-                self.handle_bot_protection()
-                # Try finding it again or check if we are on login page
-                if "login" in self.page.url:
-                    return True
-                self.page.click("a.h-login__btn--sign-in.js-loginform-trigger")
-                
-            self.page.wait_for_timeout(2000)
-            
-            self.log_progress(2, "Clicked sign-in button", "success")
-            return True
-            
-        except Exception as e:
-            self.log_progress(2, f"Failed to click sign-in: {str(e)}", "error")
-            return False
+        """Step 2: Skip - login is now handled via cookies in step1"""
+        # With cookie-based auth, login is already done in step1
+        self.log_progress(2, "Login handled via cookies - skipping sign-in step", "success")
+        return True
     
     def step3_enter_username(self):
-        """Step 3: Enter username"""
-        try:
-            self.log_progress(3, "Entering username...", "info")
-            
-            # Handle potential bot protection on login page
-            self.handle_bot_protection()
-            
-            # Wait for username field with a longer timeout to allow manual intervention
-            try:
-                self.page.wait_for_selector("input.js-login-uname[name='uname']", timeout=10000)
-            except PlaywrightTimeoutError:
-                self.log_progress(3, "Waiting for user to solve captcha...", "warning")
-                # Wait longer if element not found immediately (giving user time to solve captcha)
-                self.page.wait_for_selector("input.js-login-uname[name='uname']", timeout=60000)
-            
-            # Fill username with delay to mimic human typing
-            # Clear field first
-            self.page.fill("input.js-login-uname[name='uname']", "")
-            # Type slowly (100ms delay between keystrokes)
-            self.page.type("input.js-login-uname[name='uname']", Config.DREAMSTIME_USERNAME, delay=100)
-            
-            self.log_progress(3, "Username entered", "success")
-            return True
-            
-        except Exception as e:
-            self.log_progress(3, f"Failed to enter username: {str(e)}", "error")
-            return False
+        """Step 3: Skip - login is now handled via cookies in step1"""
+        # With cookie-based auth, username entry is not needed
+        self.log_progress(3, "Login handled via cookies - skipping username step", "success")
+        return True
     
     def step4_enter_password(self):
-        """Step 4: Enter password"""
-        try:
-            self.log_progress(4, "Entering password...", "info")
-            
-            # Fill password with delay
-            # Clear field first
-            self.page.fill("input.js-login-pass[name='pass']", "")
-            # Type slowly (100ms delay between keystrokes)
-            self.page.type("input.js-login-pass[name='pass']", Config.DREAMSTIME_PASSWORD, delay=100)
-            self.page.wait_for_timeout(1000)
-            
-            # Click submit
-            self.page.click("button[type='submit'], input[type='submit']")
-            
-            # Wait for navigation or login completion
-            self.page.wait_for_timeout(5000)
-            
-            # Check for bot protection (Press & Hold button) after login
-            self.log_progress(4, "Checking for bot protection challenge...", "info")
-            self.handle_bot_protection()
-            self.page.wait_for_timeout(2000)
-            
-            # Check if we landed on securelogin page
-            if "securelogin" in self.page.url:
-                self.log_progress(4, "Security verification page detected - please complete manually", "warning")
-                self.log_progress(4, "Waiting for you to complete verification (up to 60 seconds)...", "info")
-                
-                # Wait for user to complete verification or timeout
-                try:
-                    # Wait until URL changes from securelogin (user completes verification)
-                    self.page.wait_for_url(lambda url: "securelogin" not in url, timeout=60000)
-                    self.log_progress(4, "Verification completed, continuing...", "success")
-                except:
-                    self.log_progress(4, "Still on verification page - you may need more time", "warning")
-            
-            self.log_progress(4, "Password entered and login submitted", "success")
-            return True
-            
-        except Exception as e:
-            self.log_progress(4, f"Failed to enter password: {str(e)}", "error")
-            return False
+        """Step 4: Skip - login is now handled via cookies in step1"""
+        # With cookie-based auth, password entry is not needed
+        self.log_progress(4, "Login handled via cookies - skipping password step", "success")
+        return True
     
     def step5_click_upload_button(self):
-        """Step 5: Click on upload a file button"""
+        """Step 5: Navigate to upload page and wait for images"""
         try:
-            self.log_progress(5, "Looking for upload button...", "info")
+            self.log_progress(5, "Checking upload page...", "info")
             
-            # Click upload button
-            self.page.click("a.upload-btn.upload-btn--big.upload-btn--green")
-            self.page.wait_for_timeout(3000)
+            # If not already on upload page, navigate there
+            if "/upload-photos-for-sale" not in self.page.url and "/upload" not in self.page.url:
+                self.log_progress(5, "Navigating to upload page...", "info")
+                self.page.goto("https://www.dreamstime.com/upload")
+                self.page.wait_for_load_state('domcontentloaded')
+                self.page.wait_for_timeout(3000)
             
-            self.log_progress(5, "Clicked upload button", "success")
+            self.log_progress(5, "On upload page, ready to process images", "success")
             return True
             
         except Exception as e:
-            self.log_progress(5, f"Failed to click upload button: {str(e)}", "error")
+            self.log_progress(5, f"Failed to access upload page: {str(e)}", "error")
             return False
     
     def step6_check_and_click_images(self):
-        """Step 6: Check for images and process them with advanced features"""
+        """Step 6: Process images - click first one to open edit page, then process in loop"""
+        import re
         try:
-            self.log_progress(6, "Checking for uploaded images...", "info")
+            self.log_progress(6, "Looking for images to process...", "info")
             
-            # Wait for uploads section
-            safe_wait(self.page, 3000, self.state.is_stop_requested)
+            # Navigate to upload page first
+            if "/upload" not in self.page.url or re.search(r'/upload/\d+', self.page.url):
+                self.page.goto("https://www.dreamstime.com/upload")
+                self.page.wait_for_load_state('domcontentloaded')
+                safe_wait(self.page, 3000, self.state.is_stop_requested)
             
-            # Check upload count
-            count_element = self.page.locator("a#js-upload span")
-            if count_element.count() > 0:
-                image_count = count_element.inner_text().strip()
-                self.log_progress(6, f"Found {image_count} image(s) uploaded", "info")
+            current_url = self.page.url
+            self.log_progress(6, f"Current URL: {current_url}", "info")
             
-            # Find all image items
-            image_items = self.page.locator("div.js-readyToSubmit").all()
+            # Debug: Log page structure
+            self.log_progress(6, "Inspecting page for clickable images...", "info")
             
-            if not image_items:
-                self.log_progress(6, "No images found to process", "warning")
-                return False
+            # Look for edit links with pattern /upload/NNNNNN
+            all_links = self.page.locator("a[href*='/upload/']").all()
+            self.log_progress(6, f"Found {len(all_links)} links containing /upload/", "info")
             
-            total_to_process = min(len(image_items), self.repeat_count)
-            self.log_progress(6, f"Will process {total_to_process} image(s)...", "info")
-            
-            # Process each image up to repeat_count
-            processed = 0
-            while processed < total_to_process and not self.state.stop_requested:
+            edit_links = []
+            for link in all_links:
                 try:
-                    # Check for stop request
-                    if self.state.stop_requested:
-                        self.log_progress(6, "Stop requested, halting processing", "warning")
-                        break
+                    href = link.get_attribute('href') or ''
+                    # Match /upload/ followed by digits (not words like 'photos')
+                    if re.search(r'/upload/\d{5,}', href):
+                        edit_links.append((link, href))
+                        if len(edit_links) <= 3:
+                            self.log_progress(6, f"  Found edit link: {href}", "info")
+                except:
+                    continue
+            
+            self.log_progress(6, f"Found {len(edit_links)} image edit links", "info")
+            
+            if not edit_links:
+                # Try finding by class patterns from the extension
+                js_ready = self.page.locator(".js-readyToSubmit, .js-upload-edit, [class*='upload-item']").all()
+                self.log_progress(6, f"Found {len(js_ready)} elements with upload classes", "info")
+                
+                # Try finding any clickable thumbnails
+                thumbs = self.page.locator("img[src*='thumb'], img[src*='dreamstime']").all()
+                self.log_progress(6, f"Found {len(thumbs)} thumbnail images", "info")
+                
+                if not js_ready and not thumbs:
+                    self.log_progress(6, "No images found - please upload images first", "warning")
+                    return False
+                
+                # Click first found element
+                if js_ready:
+                    js_ready[0].click()
+                else:
+                    thumbs[0].click()
+                safe_wait(self.page, 3000, self.state.is_stop_requested)
+            else:
+                # Click first edit link
+                edit_links[0][0].click()
+                self.log_progress(6, f"Clicked: {edit_links[0][1]}", "info")
+                safe_wait(self.page, 3000, self.state.is_stop_requested)
+            
+            # Verify we're now on an edit page
+            new_url = self.page.url
+            self.log_progress(6, f"Navigated to: {new_url}", "info")
+            
+            # Run the processing loop
+            return self.process_images_loop()
+            
+        except StopRequestedException:
+            raise
+        except Exception as e:
+            self.log_progress(6, f"Failed to find images: {str(e)}", "error")
+            return False
+    
+    def process_images_loop(self):
+        """Process images in a loop on the edit page (like Chrome extension)"""
+        import re
+        processed = 0
+        
+        try:
+            # Wait for the edit page to fully load
+            self.page.wait_for_load_state('networkidle', timeout=15000)
+            safe_wait(self.page, 2000, self.state.is_stop_requested)
+            
+            for i in range(self.repeat_count):
+                if self.state.stop_requested:
+                    self.log_progress(6, "Stop requested, halting processing", "warning")
+                    break
+                
+                self.log_progress(6, f"Processing image {i + 1} of {self.repeat_count}", "info")
+                
+                # Check if we're on an edit page (URL contains /upload/edit followed by digits)
+                current_url = self.page.url
+                self.log_progress(6, f"Current URL: {current_url}", "info")
+                
+                # Match patterns like /upload/edit421059885 or /upload/421059885
+                if not re.search(r'/upload/(edit)?\d+', current_url):
+                    self.log_progress(6, "Not on edit page, navigating to find images...", "info")
                     
-                    # Re-query to avoid stale elements
-                    current_items = self.page.locator("div.js-readyToSubmit").all()
-                    if len(current_items) == 0:
+                    # Go to upload page and find edit links
+                    self.page.goto("https://www.dreamstime.com/upload")
+                    safe_wait(self.page, 3000, self.state.is_stop_requested)
+                    
+                    # Find edit page links - look for links with edit+digits
+                    all_links = self.page.locator("a[href*='/upload/edit']").all()
+                    self.log_progress(6, f"Found {len(all_links)} edit links", "info")
+                    
+                    edit_page_links = []
+                    for link in all_links:
+                        try:
+                            href = link.get_attribute('href')
+                            if href and re.search(r'/upload/edit\d+', href):
+                                edit_page_links.append(link)
+                        except:
+                            continue
+                    
+                    if not edit_page_links:
                         self.log_progress(6, "No more images to process", "info")
                         break
                     
-                    # Always process the first item (as items shift after submission)
-                    image_item = current_items[0]
-                    
-                    self.log_progress(6, f"Processing image {processed + 1} of {total_to_process}", "info")
-                    
-                    # Click edit link
-                    image_item.locator("a.js-upload-edit").click()
+                    # Click first edit link
+                    self.log_progress(6, f"Clicking: {edit_page_links[0].get_attribute('href')}", "info")
+                    edit_page_links[0].click()
                     safe_wait(self.page, 3000, self.state.is_stop_requested)
-                    
-                    self.log_progress(6, f"Opened editor for image {processed + 1}", "success")
-                    
-                    # Get current image ID for duplicate detection
-                    try:
-                        original_filename = self.page.locator("#js-originalfilename")
-                        if original_filename.count() > 0:
-                            current_image_id = original_filename.inner_text().strip()
-                            
-                            # Check for duplicate
-                            if current_image_id and current_image_id == self.state.last_image_id:
-                                self.log_progress(6, f"Duplicate image ID detected: {current_image_id}", "warning")
-                                
-                                if self.same_id_action == "stop":
-                                    self.log_progress(6, "Stopping due to duplicate image ID", "info")
-                                    break
-                                elif self.same_id_action == "skip":
-                                    self.log_progress(6, "Skipping duplicate image", "info")
-                                    # Click next button to move to next image
-                                    next_button = self.page.locator("#js-next-submit")
-                                    if next_button.count() > 0:
-                                        next_button.click()
-                                        safe_wait(self.page, 2000, self.state.is_stop_requested)
-                                    
-                                    self.state.retry_count += 1
-                                    if self.state.retry_count >= Config.MAX_RETRIES:
-                                        self.log_progress(6, "Max retries reached", "warning")
-                                        self.state.retry_count = 0
-                                        processed += 1
-                                    continue
-                            
-                            # Update last image ID
-                            self.state.last_image_id = current_image_id
-                            self.state.retry_count = 0  # Reset retry count on new image
-                    except:
-                        pass
-                    
-                    # Process title and description (step 7)
-                    result = self.step7_copy_description_to_title()
-                    if result in ("stop", "skip"):
-                        if result == "stop":
-                            self.log_progress(6, "Stopping due to empty fields", "info")
-                            break
-                        else:  # skip
-                            # Move to next image
-                            next_button = self.page.locator("#js-next-submit")
-                            if next_button.count() > 0:
-                                next_button.click()
-                                safe_wait(self.page, 2000, self.state.is_stop_requested)
-                            continue
-                    elif not result:
-                        # Failed to process, try next image
-                        continue
-                    
-                    # Process AI image categorization if enabled
-                    if not self.process_ai_image():
-                        self.log_progress(6, "AI categorization failed, continuing...", "warning")
-                    
-                    # Process model release if enabled
-                    if not self.process_model_release():
-                        self.log_progress(6, "Model release processing failed, continuing...", "warning")
-                    
-                    # Process exclusive image if enabled
-                    if not self.process_exclusive_image():
-                        self.log_progress(6, "Exclusive image processing failed, continuing...", "warning")
-                    
-                    # Submit the image (step 8)
-                    if not self.step8_submit_image():
-                        self.log_progress(6, "Failed to submit image", "error")
-                        continue
-                    
-                    # Increment processed count
-                    processed += 1
-                    self.state.processed_count = processed
-                    
-                    # Calculate progress percentage
-                    progress_pct = int((processed / total_to_process) * 100)
-                    self.log_progress(6, f"Progress: {progress_pct}% ({processed}/{total_to_process})", "info")
-                    
-                    # Apply delay between images
-                    if processed < total_to_process:
-                        delay_seconds = DelayCalculator.calculate(self.delay)
-                        self.log_progress(6, f"Waiting {delay_seconds} seconds before next image...", "info")
-                        safe_wait(self.page, delay_seconds * 1000, self.state.is_stop_requested)
-                    
-                    # Check if we need to pause
-                    if self.pause_after > 0 and processed % self.pause_after == 0 and processed < total_to_process:
-                        self.log_progress(6, f"Pausing for {self.pause_duration} seconds...", "info")
-                        safe_wait(self.page, self.pause_duration * 1000, self.state.is_stop_requested)
-                    
-                    # Navigate back to upload page if there are more images
-                    if processed < total_to_process:
-                        safe_wait(self.page, 2000, self.state.is_stop_requested)
-                        self.page.goto(Config.UPLOAD_URL)
-                        safe_wait(self.page, 3000, self.state.is_stop_requested)
-                    
-                except StopRequestedException:
-                    raise
-                except Exception as e:
-                    self.log_progress(6, f"Error processing image {processed + 1}: {str(e)}", "error")
-                    # Try to recover by going back to upload page
-                    try:
-                        self.page.goto(Config.UPLOAD_URL)
-                        safe_wait(self.page, 3000, self.state.is_stop_requested)
-                    except:
-                        pass
+                
+                # Wait for title field to be visible (confirms page loaded)
+                try:
+                    self.page.wait_for_selector("#title", timeout=10000)
+                    self.page.wait_for_selector("#description", timeout=10000)
+                except:
+                    self.log_progress(6, "Form fields not found, page may not have loaded", "error")
                     continue
+                
+                # Get current image ID for duplicate detection
+                try:
+                    original_filename = self.page.locator("#js-originalfilename")
+                    if original_filename.count() > 0:
+                        current_image_id = original_filename.inner_text().strip()
+                        self.log_progress(6, f"Processing image: {current_image_id}", "info")
+                        
+                        # Check for duplicate
+                        if current_image_id and current_image_id == self.state.last_image_id:
+                            self.log_progress(6, f"Duplicate image ID: {current_image_id}", "warning")
+                            
+                            if self.same_id_action == "stop":
+                                break
+                            elif self.same_id_action == "skip":
+                                # Click next button
+                                next_button = self.page.locator("#js-next-submit")
+                                if next_button.count() > 0:
+                                    next_button.click()
+                                    safe_wait(self.page, 2000, self.state.is_stop_requested)
+                                
+                                self.state.retry_count += 1
+                                if self.state.retry_count >= Config.MAX_RETRIES:
+                                    self.state.retry_count = 0
+                                    processed += 1
+                                continue
+                        
+                        self.state.last_image_id = current_image_id
+                        self.state.retry_count = 0
+                except Exception as e:
+                    self.log_progress(6, f"Could not get image ID: {str(e)}", "warning")
+                
+                # Check if title and description are already filled
+                title_field = self.page.locator("#title")
+                description_field = self.page.locator("#description")
+                
+                title_value = title_field.input_value() if title_field.count() > 0 else ""
+                desc_value = description_field.input_value() if description_field.count() > 0 else ""
+                
+                # If empty, try to use Gemini AI to generate content
+                if not title_value.strip() or not desc_value.strip():
+                    self.log_progress(6, "Empty title/description - attempting Gemini AI generation...", "info")
+                    
+                    # Try to get image and generate with Gemini
+                    if self.gemini_analyzer and self.gemini_analyzer.enabled:
+                        try:
+                            # Take screenshot of the image preview
+                            img_preview = self.page.locator("img.js-upload-preview, .upload-item img, img[src*='dreamstime']").first
+                            if img_preview.count() > 0:
+                                import tempfile
+                                screenshot_bytes = img_preview.screenshot()
+                                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
+                                    tmp_file.write(screenshot_bytes)
+                                    tmp_path = tmp_file.name
+                                
+                                try:
+                                    ai_result = self.gemini_analyzer.analyze_image(tmp_path)
+                                    if ai_result and ai_result.get('title') and ai_result.get('description'):
+                                        title_value = ai_result['title'][:115].replace(":", ",")
+                                        desc_value = ai_result['description']
+                                        
+                                        # Fill in the fields using the approach from the working script
+                                        self.page.evaluate(f"""
+                                            const titleField = document.querySelector('input#title');
+                                            const descField = document.querySelector('textarea#description');
+                                            
+                                            if (titleField) {{
+                                                titleField.focus();
+                                                titleField.value = {repr(title_value)};
+                                                titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                                titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                            }}
+                                            
+                                            if (descField) {{
+                                                descField.focus();
+                                                descField.value = {repr(desc_value)};
+                                                descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                                descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                            }}
+                                        """)
+                                        safe_wait(self.page, 1000, self.state.is_stop_requested)
+                                        self.log_progress(6, f"AI generated title: {title_value[:40]}...", "success")
+                                finally:
+                                    import os
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except:
+                                        pass
+                        except Exception as e:
+                            self.log_progress(6, f"Gemini AI failed: {str(e)}", "warning")
+                    
+                    # If still empty after Gemini attempt, use filename as fallback
+                    title_value = title_field.input_value() if title_field.count() > 0 else ""
+                    if not title_value.strip():
+                        title_value = f"AI Generated Image {current_image_id if 'current_image_id' in dir() else i+1}"
+                        desc_value = "AI generated digital artwork, high quality image"
+                        
+                        self.page.evaluate(f"""
+                            const titleField = document.querySelector('input#title');
+                            const descField = document.querySelector('textarea#description');
+                            
+                            if (titleField) {{
+                                titleField.focus();
+                                titleField.value = {repr(title_value)};
+                                titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                            
+                            if (descField) {{
+                                descField.focus();
+                                descField.value = {repr(desc_value)};
+                                descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        """)
+                        safe_wait(self.page, 500, self.state.is_stop_requested)
+                        self.log_progress(6, f"Using fallback title: {title_value}", "info")
+                
+                # Copy description to title if title is still empty but description exists
+                title_value = title_field.input_value() if title_field.count() > 0 else ""
+                desc_value = description_field.input_value() if description_field.count() > 0 else ""
+                
+                if not title_value.strip() and desc_value.strip():
+                    sanitized_title = desc_value.replace(":", ",")[:115]
+                    self.log_progress(6, f"Copying description to title: {sanitized_title[:40]}...", "info")
+                    
+                    self.page.evaluate(f"""
+                        const titleField = document.querySelector('input#title');
+                        if (titleField) {{
+                            titleField.focus();
+                            titleField.value = {repr(sanitized_title)};
+                            
+                            // Trigger all events
+                            const inputEvent = new Event('input', {{ bubbles: true, cancelable: true }});
+                            const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+                            
+                            titleField.dispatchEvent(inputEvent);
+                            titleField.dispatchEvent(changeEvent);
+                            
+                            // Also manually trigger any attached event listeners
+                            if (titleField.oninput) titleField.oninput(inputEvent);
+                            if (titleField.onchange) titleField.onchange(changeEvent);
+                        }}
+                    """)
+                    safe_wait(self.page, 1500, self.state.is_stop_requested)
+                
+                # Add template text to description if configured
+                if self.template != "none":
+                    template_text = TemplateManager.get_random_text(self.template)
+                    if template_text:
+                        current_desc = description_field.input_value()
+                        new_desc = f"{current_desc}{template_text}"
+                        self.page.evaluate(f"""
+                            const desc = document.querySelector('#description');
+                            if (desc) {{
+                                desc.value = {repr(new_desc)};
+                                desc.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        """)
+                        safe_wait(self.page, 500, self.state.is_stop_requested)
+                
+                # Always mark as AI generated
+                self.log_progress(6, "Marking as AI generated...", "info")
+                
+                # Remove existing category if present
+                try:
+                    remove_btn = self.page.locator("#js-remove-cat3 > i")
+                    if remove_btn.count() > 0 and remove_btn.is_visible():
+                        remove_btn.click()
+                        safe_wait(self.page, 1500, self.state.is_stop_requested)
+                except:
+                    pass
+                
+                # Set category to AI Generated (172)
+                try:
+                    cat_dropdown = self.page.locator("#M_Category_3")
+                    if cat_dropdown.count() > 0:
+                        self.page.evaluate("""
+                            const cat = document.querySelector('#M_Category_3');
+                            if (cat) {
+                                cat.value = '172';
+                                cat.dispatchEvent(new Event('change', { bubbles: true }));
+                                cat.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+                        """)
+                        safe_wait(self.page, 4500, self.state.is_stop_requested)
+                        self.log_progress(6, "Set AI category (172)", "success")
+                except Exception as e:
+                    self.log_progress(6, f"Category dropdown error: {str(e)}", "warning")
+                
+                # Set subcategory (212)
+                try:
+                    subcat_dropdown = self.page.locator("#M_Subcategory_3")
+                    if subcat_dropdown.count() > 0:
+                        self.page.evaluate("""
+                            const subcat = document.querySelector('#M_Subcategory_3');
+                            if (subcat) {
+                                subcat.value = '212';
+                                subcat.dispatchEvent(new Event('change', { bubbles: true }));
+                                subcat.dispatchEvent(new Event('input', { bubbles: true }));
+                            }
+                        """)
+                        safe_wait(self.page, 1000, self.state.is_stop_requested)
+                        self.log_progress(6, "Set AI subcategory (212)", "success")
+                except Exception as e:
+                    self.log_progress(6, f"Subcategory dropdown error: {str(e)}", "warning")
+                
+                # Click submit button
+                self.log_progress(6, "Submitting image...", "info")
+                try:
+                    submit_btn = self.page.locator("#submitbutton")
+                    if submit_btn.count() > 0:
+                        submit_btn.click()
+                        safe_wait(self.page, 3000, self.state.is_stop_requested)
+                        
+                        processed += 1
+                        self.state.processed_count = processed
+                        self.state.successful_count = processed
+                        
+                        progress_pct = int((processed / self.repeat_count) * 100)
+                        self.log_progress(6, f"✅ Submitted! Progress: {progress_pct}% ({processed}/{self.repeat_count})", "success")
+                    else:
+                        self.log_progress(6, "Submit button not found", "error")
+                except Exception as e:
+                    self.log_progress(6, f"Submit failed: {str(e)}", "error")
+                
+                # Apply delay between images
+                if processed < self.repeat_count:
+                    delay_seconds = DelayCalculator.calculate(self.delay)
+                    self.log_progress(6, f"Waiting {delay_seconds}s before next image...", "info")
+                    safe_wait(self.page, delay_seconds * 1000, self.state.is_stop_requested)
+                
+                # Check for pause
+                if self.pause_after > 0 and processed % self.pause_after == 0 and processed < self.repeat_count:
+                    self.log_progress(6, f"Pausing for {self.pause_duration}s...", "info")
+                    safe_wait(self.page, self.pause_duration * 1000, self.state.is_stop_requested)
             
             self.log_progress(6, f"Completed processing {processed} image(s)", "success")
             return True
@@ -554,7 +682,7 @@ class DreamstimeBot:
         except StopRequestedException:
             raise
         except Exception as e:
-            self.log_progress(6, f"Failed to process images: {str(e)}", "error")
+            self.log_progress(6, f"Processing loop error: {str(e)}", "error")
             return False
     
     def step7_copy_description_to_title(self):
@@ -899,13 +1027,15 @@ class DreamstimeBot:
         self.log_progress(-1, "Stop requested, automation will halt soon...", "warning")
     
     def close(self):
-        """Close the browser"""
-        if self.context:
-            self.context.close()
-        if self.browser:
-            self.browser.close()
+        """Close the browser - but keep remote debugging session open"""
+        # Don't close the browser when using remote debugging
+        # The user's logged-in Chrome session must stay open
         if self.playwright:
-            self.playwright.stop()
+            try:
+                self.playwright.stop()
+            except:
+                pass
+        self.log_progress(-1, "✅ Automation session closed - Chrome remains open for next run", "success")
 
 
 if __name__ == "__main__":

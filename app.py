@@ -3,11 +3,31 @@ from flask_cors import CORS
 from functools import wraps
 from threading import Thread
 import logging
+import os
 from automation import DreamstimeBot
 from config import Config
 
+class PrefixMiddleware:
+    def __init__(self, app, prefix=''):
+        self.app = app
+        self.prefix = prefix
+
+    def __call__(self, environ, start_response):
+        if self.prefix:
+            environ['SCRIPT_NAME'] = self.prefix
+            if environ['PATH_INFO'].startswith(self.prefix):
+                environ['PATH_INFO'] = environ['PATH_INFO'][len(self.prefix):]
+        return self.app(environ, start_response)
+
+# Get the application prefix from environment or default to empty
+APP_PREFIX = os.getenv('APP_PREFIX', '')
+
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Apply prefix middleware
+if APP_PREFIX:
+    app.wsgi_app = PrefixMiddleware(app.wsgi_app, prefix=APP_PREFIX)
 
 # Enable CORS for external integrations (n8n, webhooks, etc.)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -178,10 +198,11 @@ def stop_automation():
     global automation_state
     
     if not automation_state['running']:
+        # Return 200 even if not running - makes it safe to call unconditionally
         return jsonify({
-            'success': False,
+            'success': True,
             'message': 'No automation is currently running'
-        }), 400
+        }), 200
     
     try:
         bot = automation_state.get('bot_instance')

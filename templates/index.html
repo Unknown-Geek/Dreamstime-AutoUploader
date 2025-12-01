@@ -6,6 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dreamstime Automation Bot</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script>
+        const API_BASE = '{{ url_for("index") }}'.replace(/\/$/, '');
+    </script>
 </head>
 
 <body>
@@ -276,7 +279,7 @@
                 stopBtn.disabled = false;
                 startBtn.innerHTML = '<span class="btn-icon">⏳</span> Starting...';
 
-                const response = await fetch('/start', {
+                const response = await fetch(API_BASE + '/start', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -311,7 +314,7 @@
                 stopBtn.disabled = true;
                 stopBtn.innerHTML = '<span class="btn-icon">⏳</span> Stopping...';
 
-                const response = await fetch('/stop', {
+                const response = await fetch(API_BASE + '/stop', {
                     method: 'POST'
                 });
 
@@ -333,7 +336,7 @@
 
         async function checkStatus() {
             try {
-                const response = await fetch('/status');
+                const response = await fetch(API_BASE + '/status');
                 const data = await response.json();
 
                 if (data.progress && data.progress.length > 0) {
