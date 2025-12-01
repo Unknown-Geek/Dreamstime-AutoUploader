@@ -45,3 +45,4 @@ venv.bak/
 Thumbs.db
 
 *.png
+chrome_profile/

@@ -188,7 +188,31 @@ def start_automation():
 @app.route('/api/start', methods=['POST'])
 @require_api_key
 def api_start_automation():
-    """API endpoint to start automation (protected with API key)"""
+    """API endpoint to start automation (protected with API key)
+    
+    Automatically stops any running automation before starting a new one.
+    This ensures clean state when called from n8n or other automation tools.
+    """
+    global automation_state
+    
+    # Auto-stop any running automation first
+    if automation_state['running']:
+        logger.info("Stopping existing automation before starting new one...")
+        bot = automation_state.get('bot_instance')
+        if bot:
+            bot.stop()
+        # Wait for it to stop (max 5 seconds)
+        import time
+        for _ in range(10):
+            if not automation_state['running']:
+                break
+            time.sleep(0.5)
+        # Force reset state if still running
+        if automation_state['running']:
+            automation_state['running'] = False
+            automation_state['status'] = 'stopped'
+            automation_state['bot_instance'] = None
+    
     return start_automation()
 
 
