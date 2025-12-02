@@ -128,11 +128,11 @@ class DelayCalculator:
             Random delay in seconds
         """
         if delay_option == "slow":
-            # 10-16 seconds for slow mode
-            return random.randint(10, 16)
+            # 45-90 seconds for slow mode (very safe)
+            return random.randint(45, 90)
         else:
-            # 1-5 seconds for fast mode (small random pause as requested)
-            return random.randint(1, 5)
+            # 15-30 seconds for fast mode (increased to avoid rate limiting)
+            return random.randint(15, 30)
 
 
 def sanitize_title(title):

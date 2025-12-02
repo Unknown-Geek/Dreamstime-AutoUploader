@@ -40,10 +40,10 @@ class Config:
     DEFAULT_MODEL_RELEASE = 'no'  # No model releases
     DEFAULT_EXCLUSIVE_IMAGE = 'no'  # Not exclusive
     DEFAULT_AI_IMAGE = 'yes'  # All images marked as AI generated
-    DEFAULT_DELAY = 'fast'  # Fast processing with random small pauses (1-5 seconds)
+    DEFAULT_DELAY = 'slow'  # Slow processing to avoid rate limiting (45-90 seconds)
     DEFAULT_REPEAT_COUNT = 999  # Process all unfinished images
-    DEFAULT_PAUSE_AFTER = 0  # No pause intervals between batches
-    DEFAULT_PAUSE_DURATION = 60
+    DEFAULT_PAUSE_AFTER = 10  # Pause every 10 images
+    DEFAULT_PAUSE_DURATION = 120  # 2 minute pause to avoid rate limiting
     DEFAULT_SAME_ID_ACTION = 'skip'  # Skip duplicates
     MAX_RETRIES = 3
     
