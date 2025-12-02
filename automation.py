@@ -106,15 +106,17 @@ class DreamstimeBot:
                 self.browser = self.playwright.chromium.connect_over_cdp("http://localhost:9222")
                 self.context = self.browser.contexts[0]
                 
-                # Get the active page
+                # Get the active page - prefer the first page to maintain state
                 if len(self.context.pages) > 0:
                     self.page = self.context.pages[0]
+                    current_url = self.page.url
+                    self.log_progress(0, f"Connected to existing page: {current_url}", "info")
                 else:
                     self.page = self.context.new_page()
                 
                 self.page.set_default_timeout(Config.TIMEOUT)
                 
-                self.log_progress(0, "✅ Connected to existing Chrome session (already logged in!)", "success")
+                self.log_progress(0, "✅ Connected to existing Chrome session (page state preserved!)", "success")
                 return True
                 
             except Exception as e:
@@ -1013,12 +1015,8 @@ class DreamstimeBot:
             
         finally:
             self.state.is_running = False
-            # Keep browser open for 10 seconds to view results
-            if self.page:
-                try:
-                    self.page.wait_for_timeout(10000)
-                except:
-                    pass
+            # Don't wait or close - leave the browser exactly as-is
+            # The page will stay on whatever URL it's currently on
             self.close()
     
     def stop(self):
@@ -1027,15 +1025,24 @@ class DreamstimeBot:
         self.log_progress(-1, "Stop requested, automation will halt soon...", "warning")
     
     def close(self):
-        """Close the browser - but keep remote debugging session open"""
-        # Don't close the browser when using remote debugging
-        # The user's logged-in Chrome session must stay open
+        """Disconnect from browser - but keep Chrome session completely intact"""
+        # IMPORTANT: Do NOT close browser or context when using remote debugging
+        # The user's logged-in Chrome session and current page state must stay exactly as-is
+        
+        # Only disconnect playwright, don't close anything
         if self.playwright:
             try:
+                # Disconnect gracefully without closing the browser
                 self.playwright.stop()
             except:
                 pass
-        self.log_progress(-1, "✅ Automation session closed - Chrome remains open for next run", "success")
+        
+        # Clear references but browser stays open with same page
+        self.browser = None
+        self.context = None
+        self.page = None
+        
+        self.log_progress(-1, "✅ Disconnected from Chrome - browser and page remain open unchanged", "success")
 
 
 if __name__ == "__main__":
