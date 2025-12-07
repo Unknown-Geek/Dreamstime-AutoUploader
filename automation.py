@@ -531,11 +531,18 @@ class DreamstimeBot:
                         except Exception as e:
                             self.log_progress(6, f"Gemini AI failed: {str(e)}", "warning")
                     
-                    # If still empty after Gemini attempt, use filename as fallback
+                    # If still empty after Gemini attempt, fallback using description when available
                     title_value = title_field.input_value() if title_field.count() > 0 else ""
+                    desc_value = description_field.input_value() if description_field.count() > 0 else ""
                     if not title_value.strip():
-                        title_value = f"AI Generated Image {current_image_id if 'current_image_id' in dir() else i+1}"
-                        desc_value = "AI generated digital artwork, high quality image"
+                        if desc_value.strip():
+                            # Prefer the description as title fallback
+                            sanitized = desc_value.replace(":", ",")[:115]
+                            title_value = sanitized
+                        else:
+                            # Last-resort generic fallback
+                            title_value = f"AI Generated Image {current_image_id if 'current_image_id' in dir() else i+1}"
+                            desc_value = "AI generated digital artwork, high quality image"
                         
                         self.page.evaluate(f"""
                             const titleField = document.querySelector('input#title');
@@ -548,7 +555,7 @@ class DreamstimeBot:
                                 titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
                             }}
                             
-                            if (descField) {{
+                            if (descField && {repr(desc_value)}.length > 0) {{
                                 descField.focus();
                                 descField.value = {repr(desc_value)};
                                 descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
