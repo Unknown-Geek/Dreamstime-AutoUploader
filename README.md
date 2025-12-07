@@ -2,35 +2,35 @@
 
 🤖 **Automated image submission workflow for Dreamstime with advanced features**
 
-## 🎯 Features
+## Features
 
 ### Core Automation
-- ✅ Automatic login to Dreamstime
-- ✅ Navigate to upload section
-- ✅ Process uploaded images
-- ✅ Title sanitization (remove colons, limit to 115 chars)
-- ✅ Auto-submit images
+- Automatic login to Dreamstime
+- Navigate to upload section
+- Process uploaded images
+- Title sanitization (remove colons, limit to 115 chars)
+- Auto-submit images
 
-### Advanced Features (NEW! 🎉)
-- ✨ **Template-based description enhancement** - Two template sets with 40 descriptive phrases each
-- 🤖 **AI image auto-categorization** - Automatically categorize AI-generated images
-- 📝 **Model release management** - Add model releases automatically
-- ⭐ **Exclusive content marking** - Mark images as exclusive
-- 🔄 **Batch processing** - Process multiple images with configurable count
-- ⏸️ **Pause intervals** - Pause after N images for M seconds
-- 🎯 **Duplicate detection** - Skip or stop on duplicate image IDs
-- ⚡ **Configurable delays** - Fast (5-11s) or Slow (10-16s) modes
-- 🛑 **Stop functionality** - Gracefully stop automation anytime
-- 📊 **Real-time progress tracking** - See exactly what's happening
+### Advanced Features
+- **Template-based description enhancement** - Two template sets with 40 descriptive phrases each
+- **AI image auto-categorization** - Automatically categorize AI-generated images
+- **Model release management** - Add model releases automatically
+- **Exclusive content marking** - Mark images as exclusive
+- **Batch processing** - Process multiple images (up to 10,000 per run)
+- ⏸️ **Pause intervals** - Pause every 20 images for 2 minutes by defaulty default
+- **Duplicate detection** - Skip or stop on duplicate image IDs
+- ⚡ **Configurable delays** - Fast (5-10s) or Slow (10-15s) modes
+- **Stop functionality** - Gracefully stop automation anytime
+- **Real-time progress tracking** - See exactly what's happening
 
-## 📋 Requirements
+## Requirements
 
 - Python 3.8+
 - Playwright
 - Flask
 - python-dotenv
 
-## 🚀 Installation
+## Installation
 
 1. **Clone the repository**
    ```bash
@@ -63,7 +63,7 @@
    FLASK_DEBUG=True
    ```
 
-## 💻 Usage
+## Usage
 
 ### Start the Web Interface
 
@@ -87,8 +87,8 @@ The web interface provides comprehensive options:
 - **Exclusive**: Mark as exclusive content
 
 **3. Processing Configuration**
-- **Speed**: Fast (5-11s delays) or Slow (10-16s delays)
-- **Number of Images**: How many to process (1-100)
+- **Speed**: Fast (5-10s delays) or Slow (10-15s delays)
+- **Number of Images**: How many to process (unlimited, default 10000)
 - **Pause Settings**: Pause every N images for M seconds
 - **Duplicate Action**: Skip or stop on duplicate image IDs
 
@@ -108,8 +108,8 @@ Template: Template 1 (Professional)
 AI Generated: Yes
 Number of Images: 20
 Speed: Slow
-Pause After: 5 images
-Pause Duration: 60 seconds
+Pause After: 10 images
+Pause Duration: 120 seconds
 ```
 
 #### Exclusive Content with Model Releases
@@ -119,11 +119,11 @@ Manual Description: "High quality commercial content"
 Model Release: Yes
 Exclusive: Yes
 Number of Images: 50
-Pause After: 10
+Pause After: 20
 Duplicate Action: Stop
 ```
 
-## 🏗️ Architecture
+## Architecture
 
 ### Backend (Python + Playwright)
 
@@ -158,7 +158,7 @@ Duplicate Action: Stop
 - **`static/style.css`**: Modern, professional styling
   - Dark mode design
   - Smooth animations
-## 📊 Progress Tracking
+## Progress Tracking
 
 Real-time updates show:
 - Current step and action
@@ -167,7 +167,7 @@ Real-time updates show:
 - Processed vs. successful count
 - Timestamps for all actions
 
-## 🎨 UI Features
+## UI Features
 
 - **Modern Dark Theme**: Professional gradient design
 - **Real-time Status**: Color-coded status badge with animations
@@ -176,7 +176,7 @@ Real-time updates show:
 - **Smooth Animations**: Fade-in effects and transitions
 - **Form Validation**: Input validation and helpful tooltips
 
-## 🔍 Debugging
+## Debugging
 
 Check console logs for detailed execution information:
 
@@ -190,63 +190,85 @@ Browser console (F12) shows:
 - Status polling updates
 - JavaScript errors (if any)
 
-## ⚠️ Important Notes
+## API Integration
 
-1. **Non-Headless Mode**: The browser runs in visible mode so you can monitor progress
-2. **Manual Intervention**: You may need to solve captchas manually
-3. **Credentials Security**: Never commit your `.env` file to version control
-4. **Rate Limiting**: Use appropriate delays to avoid triggering anti-bot measures
-5. **Duplicate Detection**: The bot tracks image IDs to prevent reprocessing
+The bot exposes RESTful API endpoints for integration with n8n, webhooks, or other automation tools:
 
-## 📝 Changelog
+### Endpoints
 
-### Version 2.0 (Current)
-- ✨ Added template system with 80 descriptive phrases
-- 🤖 AI image auto-categorization
-- 📝 Model release management
-- ⭐ Exclusive content marking
-- 🔄 Configurable batch processing
-- ⏸️ Pause interval support
-- 🎯 Duplicate image detection
-- ⚡ Configurable processing speeds
-- 🛑 Stop functionality
-- 📊 Enhanced progress tracking
-- 🎨 Complete UI overhaul
+```
+POST /api/start      - Start automation with optional parameters
+POST /api/stop       - Stop running automation
+GET  /api/status     - Get current automation status
+GET  /health         - Health check for the bot service
+```
+
+### Example API Call
+
+```bash
+curl -X POST https://n8n.shravanpandala.me/dreamstime/api/start \
+  -H "Content-Type: application/json" \
+  -d '{"repeatCount": 100}'
+```
+
+### Health Check
+
+The bot includes automatic health monitoring:
+- Systemd timer checks remote debugging port every 2 minutes
+- Auto-restarts browser if connection is lost
+- Maintains persistent browser session to prevent captcha challenges
+
+## Important Notes
+
+1. **Persistent Browser Session**: The browser maintains a persistent session to avoid repeated captcha challenges
+2. **Health Monitoring**: Automatic health checks restart the browser if needed
+3. **Manual Intervention**: Initial login may require manual captcha solving via VNC
+4. **Credentials Security**: Never commit your `.env` file to version control
+5. **Rate Limiting**: Default delays (5-15 seconds) help avoid triggering anti-bot measures
+6. **Duplicate Detection**: The bot tracks image IDs to prevent reprocessing
+7. **Max Images Per Run**: Default 10,000 images per API call (customizable via payload)
+
+## Changelog
+
+### Version 2.1 (Current)
+- Added Gemini AI image analysis for descriptive title/description generation
+- Improved fallback title logic to use descriptions when AI analysis unavailable
+- Increased default batch size to 10,000 images per run
+- Added health check system with automatic browser recovery
+- Fixed browser session persistence to prevent captcha loops
+- Reduced delay ranges (5-10s fast, 10-15s slow) for faster processing
+
+### Version 2.0
+- Added template system with 80 descriptive phrases
+- AI image auto-categorization
+- Model release management
+- Exclusive content marking
+- Configurable batch processing
+- Pause interval support
+- Duplicate image detection
+- Configurable processing speeds
+- Stop functionality
+- Enhanced progress tracking
+- UI overhaul
 
 ### Version 1.0
-- ✅ Basic automation workflow
-- ✅ Login and navigation
-- ✅ Image processing
-- ✅ Basic progress tracking
+- Basic automation workflow
+- Login and navigation
+- Image processing
+- Basic progress tracking
 
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these guidelines:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## 📄 License
-
-This project is for educational and personal use. Please comply with Dreamstime's Terms of Service.
-
-## 🆘 Support
+## Support
 
 For issues or questions:
-1. Check the walkthrough documentation
-2. Review error logs in the console
-3. Ensure credentials are correctly configured
-4. Verify Playwright browsers are installed
+1. Check browser status via VNC (https://vnc.shravanpandala.me)
+2. Review logs: `sudo journalctl -u dreamstime-bot -f`
+3. Verify Chromium service: `sudo systemctl status chromium-dreamstime`
+4. Ensure credentials are correctly configured in `.env`
+5. Check health: `curl http://localhost:9222/json/version`
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Built with Playwright for reliable browser automation
 - Flask for the web interface
-- Modern CSS for professional styling
-- Inspired by browser extension automation patterns
-
----
-
-**Made with ❤️ for automating tedious tasks**
+- Google Gemini AI for image analysis
+- Systemd for service management and health monitoring
