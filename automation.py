@@ -31,6 +31,8 @@ class AutomationState:
         self.last_image_id = ""
         self.processed_count = 0
         self.successful_count = 0
+        self.page_stuck_count = 0  # Track consecutive stuck detections
+        self.max_stuck_retries = 3  # Max times to refresh before giving up
     
     def reset(self):
         """Reset state for new automation run"""
@@ -40,6 +42,7 @@ class AutomationState:
         self.last_image_id = ""
         self.processed_count = 0
         self.successful_count = 0
+        self.page_stuck_count = 0
     
     def is_stop_requested(self):
         """Check if stop was requested"""
@@ -128,6 +131,243 @@ class DreamstimeBot:
             self.log_progress(0, f"Failed to setup browser: {str(e)}", "error")
             return False
     
+    def check_for_captcha(self):
+        """Check if captcha is present and attempt automatic bypass, fallback to manual"""
+        try:
+            # Check page title first (most reliable indicator)
+            page_title = self.page.title()
+            captcha_detected = "denied" in page_title.lower() or "blocked" in page_title.lower()
+            
+            # Also check for common captcha element patterns
+            if not captcha_detected:
+                captcha_selectors = [
+                    'text="Press & Hold"',
+                    '.gkfWUyaFMteSFAk',
+                    '[aria-label*="Press"]',
+                    'text="Human Challenge"'
+                ]
+                for selector in captcha_selectors:
+                    if self.page.locator(selector).count() > 0:
+                        captcha_detected = True
+                        break
+            
+            if captcha_detected:
+                self.log_progress(-1, f"⚠️ CAPTCHA DETECTED (title: {page_title}) - Attempting automatic bypass...", "warning")
+                
+                # Try automatic bypass using keyboard simulation (PerimeterX bypass technique)
+                bypass_success = self._attempt_captcha_bypass()
+                
+                if bypass_success:
+                    self.log_progress(-1, "✅ CAPTCHA bypassed automatically!", "success")
+                    return True
+                
+                # Fall back to manual intervention
+                self.log_progress(-1, "⚠️ Auto-bypass failed - Manual intervention required", "warning")
+                self.log_progress(-1, "Please solve captcha via VNC: https://vnc.shravanpandala.me", "warning")
+                self.log_progress(-1, "Waiting up to 5 minutes for captcha resolution...", "info")
+                
+                # Wait up to 5 minutes for captcha to be solved
+                captcha_selectors = [
+                    'text="Press & Hold"',
+                    '.gkfWUyaFMteSFAk',
+                    '[aria-label*="Press"]',
+                    'text="Human Challenge"'
+                ]
+                
+                for attempt in range(60):
+                    if self.state.is_stop_requested():
+                        raise StopRequestedException("Stop requested during captcha wait")
+                    
+                    safe_wait(self.page, 5000, self.state.is_stop_requested)
+                    
+                    # Check if captcha is gone (check title first)
+                    page_title = self.page.title()
+                    if "denied" not in page_title.lower() and "blocked" not in page_title.lower():
+                        self.log_progress(-1, "✅ Captcha solved! Resuming automation...", "success")
+                        return True
+                    
+                    if attempt % 6 == 0:  # Log every 30 seconds
+                        remaining = (60 - attempt) * 5
+                        self.log_progress(-1, f"Still waiting for captcha... ({remaining}s remaining)", "info")
+                
+                self.log_progress(-1, "❌ Captcha timeout - stopping automation", "error")
+                return False
+            
+            return True
+            
+        except StopRequestedException:
+            raise
+        except Exception as e:
+            self.log_progress(-1, f"Error checking captcha: {str(e)}", "warning")
+            return True  # Continue on error
+    
+    def _attempt_captcha_bypass(self):
+        """
+        Attempt to automatically bypass PerimeterX 'Press & Hold' CAPTCHA
+        using keyboard simulation technique.
+        
+        The technique: Press Tab once to focus on the button, then hold Enter key for 5 seconds.
+        This mimics the 'Press & Hold' action without needing to locate/click the button.
+        """
+        try:
+            self.log_progress(-1, "🔄 Trying keyboard bypass (Tab + Enter hold)...", "info")
+            
+            # Small delay before starting
+            time.sleep(0.5)
+            
+            # Press Tab ONCE to focus on the Press & Hold button
+            self.page.keyboard.press('Tab')
+            self.log_progress(-1, "📍 Pressed Tab to focus on button", "info")
+            
+            # Small delay before pressing Enter (like a human would)
+            time.sleep(0.3)
+            
+            # Hold Enter key for 8 seconds
+            self.log_progress(-1, "⏳ Holding Enter for 8 seconds...", "info")
+            self.page.keyboard.down('Enter')
+            time.sleep(8.0)
+            self.page.keyboard.up('Enter')
+            
+            self.log_progress(-1, "✅ Released Enter key, waiting for page response...", "info")
+            
+            # Wait for page to process and potentially redirect
+            time.sleep(3.0)
+            
+            # Check page title to see if bypass worked
+            page_title = self.page.title()
+            if "denied" in page_title.lower() or "blocked" in page_title.lower():
+                self.log_progress(-1, f"❌ Still blocked (title: {page_title})", "warning")
+                return False
+            
+            self.log_progress(-1, f"🎉 CAPTCHA bypassed! New title: {page_title}", "success")
+            return True
+            
+        except Exception as e:
+            self.log_progress(-1, f"Error during captcha bypass: {str(e)}", "warning")
+            return False
+    
+    def is_page_stuck(self):
+        """
+        Check if the page appears to be stuck/unresponsive.
+        Returns True if page seems stuck, False otherwise.
+        """
+        try:
+            # Quick check - see if we can get basic page info
+            page_url = self.page.url
+            page_title = self.page.title()
+            
+            # Check for blank/empty page
+            if not page_url or page_url == "about:blank":
+                self.log_progress(-1, "⚠️ Page appears blank/empty", "warning")
+                return True
+            
+            # Check for common error indicators in title
+            error_indicators = ["error", "timeout", "refused", "unavailable", "failed"]
+            if any(indicator in page_title.lower() for indicator in error_indicators):
+                self.log_progress(-1, f"⚠️ Page shows error state: {page_title}", "warning")
+                return True
+            
+            # Try to evaluate simple JS to check if page is responsive
+            try:
+                result = self.page.evaluate("document.readyState", timeout=5000)
+                if result not in ["complete", "interactive"]:
+                    self.log_progress(-1, f"⚠️ Page not fully loaded: {result}", "warning")
+                    return True
+            except Exception:
+                self.log_progress(-1, "⚠️ Page not responding to JavaScript", "warning")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.log_progress(-1, f"⚠️ Error checking page state: {str(e)}", "warning")
+            return True
+    
+    def refresh_page_if_stuck(self, context_msg=""):
+        """
+        Refresh the page if it appears stuck. Returns True if page was refreshed successfully.
+        
+        Args:
+            context_msg: Context message describing what operation was happening
+            
+        Returns:
+            True if page was refreshed and recovered, False if max retries exceeded
+        """
+        try:
+            if self.state.page_stuck_count >= self.state.max_stuck_retries:
+                self.log_progress(-1, f"❌ Max refresh retries ({self.state.max_stuck_retries}) exceeded - giving up", "error")
+                return False
+            
+            self.state.page_stuck_count += 1
+            self.log_progress(-1, f"🔄 Page stuck{' during ' + context_msg if context_msg else ''} - refreshing (attempt {self.state.page_stuck_count}/{self.state.max_stuck_retries})...", "warning")
+            
+            current_url = self.page.url
+            
+            # Try to reload the page
+            try:
+                self.page.reload(timeout=30000, wait_until="domcontentloaded")
+            except PlaywrightTimeoutError:
+                # If reload times out, try navigating directly
+                self.log_progress(-1, "⚠️ Reload timed out, trying direct navigation...", "warning")
+                if current_url and current_url != "about:blank":
+                    self.page.goto(current_url, timeout=30000, wait_until="domcontentloaded")
+                else:
+                    # Navigate to upload page as fallback
+                    self.page.goto("https://www.dreamstime.com/upload", timeout=30000, wait_until="domcontentloaded")
+            
+            # Wait for page to stabilize
+            safe_wait(self.page, 3000, self.state.is_stop_requested)
+            
+            # Verify page is responsive now
+            if not self.is_page_stuck():
+                self.log_progress(-1, "✅ Page refreshed successfully!", "success")
+                self.state.page_stuck_count = 0  # Reset stuck counter on success
+                return True
+            else:
+                self.log_progress(-1, "⚠️ Page still not responsive after refresh", "warning")
+                return self.refresh_page_if_stuck(context_msg)  # Recursive retry
+            
+        except StopRequestedException:
+            raise
+        except Exception as e:
+            self.log_progress(-1, f"❌ Error during page refresh: {str(e)}", "error")
+            return False
+    
+    def wait_for_element_with_refresh(self, selector, timeout=10000, context_msg=""):
+        """
+        Wait for an element, refreshing the page if it gets stuck.
+        
+        Args:
+            selector: CSS selector to wait for
+            timeout: Timeout in milliseconds
+            context_msg: Context message for logging
+            
+        Returns:
+            True if element found, False otherwise
+        """
+        try:
+            self.page.wait_for_selector(selector, timeout=timeout)
+            self.state.page_stuck_count = 0  # Reset on success
+            return True
+        except PlaywrightTimeoutError:
+            self.log_progress(-1, f"⚠️ Timeout waiting for '{selector}'{' during ' + context_msg if context_msg else ''}", "warning")
+            
+            # Check if page is stuck and try to refresh
+            if self.is_page_stuck():
+                if self.refresh_page_if_stuck(context_msg):
+                    # Try waiting for element again after refresh
+                    try:
+                        self.page.wait_for_selector(selector, timeout=timeout)
+                        return True
+                    except PlaywrightTimeoutError:
+                        return False
+            return False
+        except StopRequestedException:
+            raise
+        except Exception as e:
+            self.log_progress(-1, f"Error waiting for element: {str(e)}", "error")
+            return False
+
     def save_cookies(self):
         """Save cookies to file after successful login"""
         try:
@@ -254,10 +494,34 @@ class DreamstimeBot:
         try:
             self.log_progress(1, "Navigating to upload page...", "info")
             
-            # Navigate to the upload page directly (already logged in via existing Chrome session)
-            self.page.goto("https://www.dreamstime.com/upload")
+            # First navigate to stock vector page (workaround for website glitch)
+            self.log_progress(1, "Going to stock vector page first (website glitch workaround)...", "info")
+            self.page.goto("https://www.dreamstime.com/stock-vector-illustrations-clipart")
             self.page.wait_for_load_state('domcontentloaded')
+            self.page.wait_for_timeout(2000)
+            
+            # Check for CAPTCHA on vector page
+            if not self.check_for_captcha():
+                self.log_progress(1, "CAPTCHA could not be solved - stopping", "error")
+                return False
+            
+            # Now navigate to the upload page
+            self.log_progress(1, "Now navigating to upload page...", "info")
+            try:
+                self.page.goto("https://www.dreamstime.com/upload", timeout=30000)
+                self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+            except PlaywrightTimeoutError:
+                self.log_progress(1, "⚠️ Upload page load timeout - checking if stuck...", "warning")
+                if self.is_page_stuck():
+                    if not self.refresh_page_if_stuck("navigating to upload page"):
+                        return False
+            
             self.page.wait_for_timeout(3000)
+            
+            # Check for CAPTCHA after navigation to upload
+            if not self.check_for_captcha():
+                self.log_progress(1, "CAPTCHA could not be solved - stopping", "error")
+                return False
             
             # Verify we're logged in
             if self.is_logged_in():
@@ -267,6 +531,12 @@ class DreamstimeBot:
                 self.log_progress(1, "⚠️ Not logged in - please log in via VNC first", "warning")
                 return False
             
+        except PlaywrightTimeoutError as e:
+            self.log_progress(1, f"⚠️ Navigation timeout: {str(e)}", "warning")
+            if self.is_page_stuck():
+                if self.refresh_page_if_stuck("navigation timeout"):
+                    return self.step1_navigate_to_dreamstime()  # Retry the step
+            return False
         except Exception as e:
             self.log_progress(1, f"Navigation failed: {str(e)}", "error")
             return False
@@ -294,12 +564,28 @@ class DreamstimeBot:
         try:
             self.log_progress(5, "Checking upload page...", "info")
             
-            # If not already on upload page, navigate there
+            # If not already on upload page, navigate there (with workaround)
             if "/upload-photos-for-sale" not in self.page.url and "/upload" not in self.page.url:
+                # First go to stock vector page (website glitch workaround)
+                self.log_progress(5, "Going to stock vector page first...", "info")
+                self.page.goto("https://www.dreamstime.com/stock-vector-illustrations-clipart")
+                self.page.wait_for_load_state('domcontentloaded')
+                self.page.wait_for_timeout(2000)
+                
+                if not self.check_for_captcha():
+                    self.log_progress(5, "CAPTCHA could not be solved - stopping", "error")
+                    return False
+                
+                # Then navigate to upload page
                 self.log_progress(5, "Navigating to upload page...", "info")
                 self.page.goto("https://www.dreamstime.com/upload")
                 self.page.wait_for_load_state('domcontentloaded')
                 self.page.wait_for_timeout(3000)
+            
+            # Check for CAPTCHA after navigation
+            if not self.check_for_captcha():
+                self.log_progress(5, "CAPTCHA could not be solved - stopping", "error")
+                return False
             
             self.log_progress(5, "On upload page, ready to process images", "success")
             return True
@@ -388,9 +674,22 @@ class DreamstimeBot:
         processed = 0
         
         try:
-            # Wait for the edit page to fully load
-            self.page.wait_for_load_state('networkidle', timeout=15000)
+            # Wait for the edit page to fully load - with stuck page detection
+            try:
+                self.page.wait_for_load_state('networkidle', timeout=15000)
+            except PlaywrightTimeoutError:
+                self.log_progress(6, "⚠️ Page load timeout - checking if stuck...", "warning")
+                if self.is_page_stuck():
+                    if not self.refresh_page_if_stuck("initial page load"):
+                        self.log_progress(6, "❌ Could not recover from stuck page", "error")
+                        return False
+            
             safe_wait(self.page, 2000, self.state.is_stop_requested)
+            
+            # Check for CAPTCHA before starting loop
+            if not self.check_for_captcha():
+                self.log_progress(6, "CAPTCHA could not be solved - stopping", "error")
+                return
             
             for i in range(self.repeat_count):
                 if self.state.stop_requested:
@@ -407,9 +706,22 @@ class DreamstimeBot:
                 if not re.search(r'/upload/(edit)?\d+', current_url):
                     self.log_progress(6, "Not on edit page, navigating to find images...", "info")
                     
-                    # Go to upload page and find edit links
+                    # First go to stock vector page (website glitch workaround)
+                    self.page.goto("https://www.dreamstime.com/stock-vector-illustrations-clipart")
+                    safe_wait(self.page, 2000, self.state.is_stop_requested)
+                    
+                    if not self.check_for_captcha():
+                        self.log_progress(6, "CAPTCHA could not be solved - stopping", "error")
+                        break
+                    
+                    # Then go to upload page
                     self.page.goto("https://www.dreamstime.com/upload")
                     safe_wait(self.page, 3000, self.state.is_stop_requested)
+                    
+                    # Check for CAPTCHA after navigation
+                    if not self.check_for_captcha():
+                        self.log_progress(6, "CAPTCHA could not be solved - stopping", "error")
+                        break
                     
                     # Find edit page links - look for links with edit+digits
                     all_links = self.page.locator("a[href*='/upload/edit']").all()
@@ -433,12 +745,22 @@ class DreamstimeBot:
                     edit_page_links[0].click()
                     safe_wait(self.page, 3000, self.state.is_stop_requested)
                 
-                # Wait for title field to be visible (confirms page loaded)
-                try:
-                    self.page.wait_for_selector("#title", timeout=10000)
-                    self.page.wait_for_selector("#description", timeout=10000)
-                except:
-                    self.log_progress(6, "Form fields not found, page may not have loaded", "error")
+                # Wait for title field to be visible (confirms page loaded) - with page refresh on stuck
+                title_found = self.wait_for_element_with_refresh("#title", timeout=15000, context_msg="waiting for edit form")
+                if not title_found:
+                    self.log_progress(6, "Form fields not found after refresh attempts, skipping to next image", "warning")
+                    # Try to navigate back and continue
+                    try:
+                        self.page.goto("https://www.dreamstime.com/upload", timeout=15000, wait_until="domcontentloaded")
+                        safe_wait(self.page, 2000, self.state.is_stop_requested)
+                    except:
+                        pass
+                    continue
+                
+                # Also check for description field
+                desc_found = self.wait_for_element_with_refresh("#description", timeout=10000, context_msg="waiting for description field")
+                if not desc_found:
+                    self.log_progress(6, "Description field not found, skipping to next image", "warning")
                     continue
                 
                 # Get current image ID for duplicate detection
@@ -655,6 +977,11 @@ class DreamstimeBot:
                 except Exception as e:
                     self.log_progress(6, f"Subcategory dropdown error: {str(e)}", "warning")
                 
+                # Check for captcha before submitting
+                if not self.check_for_captcha():
+                    self.log_progress(6, "Captcha timeout - stopping automation", "error")
+                    break
+                
                 # Click submit button
                 self.log_progress(6, "Submitting image...", "info")
                 try:
@@ -662,6 +989,18 @@ class DreamstimeBot:
                     if submit_btn.count() > 0:
                         submit_btn.click()
                         safe_wait(self.page, 3000, self.state.is_stop_requested)
+                        
+                        # Check if page got stuck after submit click
+                        if self.is_page_stuck():
+                            self.log_progress(6, "⚠️ Page stuck after submit - attempting refresh...", "warning")
+                            if not self.refresh_page_if_stuck("after submit"):
+                                self.log_progress(6, "❌ Could not recover after submit - continuing to next image", "error")
+                                continue
+                        
+                        # Check for captcha after submission
+                        if not self.check_for_captcha():
+                            self.log_progress(6, "Captcha timeout - stopping automation", "error")
+                            break
                         
                         processed += 1
                         self.state.processed_count = processed
@@ -671,8 +1010,16 @@ class DreamstimeBot:
                         self.log_progress(6, f"✅ Submitted! Progress: {progress_pct}% ({processed}/{self.repeat_count})", "success")
                     else:
                         self.log_progress(6, "Submit button not found", "error")
+                        # Check if page is stuck when button not found
+                        if self.is_page_stuck():
+                            if self.refresh_page_if_stuck("submit button not found"):
+                                continue  # Retry this iteration
                 except Exception as e:
                     self.log_progress(6, f"Submit failed: {str(e)}", "error")
+                    # Check if exception was due to stuck page
+                    if self.is_page_stuck():
+                        if self.refresh_page_if_stuck("submit exception"):
+                            continue  # Retry this iteration
                 
                 # Apply delay between images
                 if processed < self.repeat_count:
