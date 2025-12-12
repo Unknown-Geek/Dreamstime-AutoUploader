@@ -801,11 +801,11 @@ class DreamstimeBot:
                 title_value = title_field.input_value() if title_field.count() > 0 else ""
                 desc_value = description_field.input_value() if description_field.count() > 0 else ""
                 
-                # If empty, try to use Gemini AI to generate content
-                if not title_value.strip() or not desc_value.strip():
-                    self.log_progress(6, "Empty title/description - attempting Gemini AI generation...", "info")
+                # If title is empty, try to use Gemini AI to generate only title (faster!)
+                if not title_value.strip():
+                    self.log_progress(6, "Empty title - attempting Gemini AI generation...", "info")
                     
-                    # Try to get image and generate with Gemini
+                    # Try to get image and generate title with Gemini
                     if self.gemini_analyzer and self.gemini_analyzer.enabled:
                         try:
                             # Take screenshot of the image preview
@@ -818,15 +818,14 @@ class DreamstimeBot:
                                     tmp_path = tmp_file.name
                                 
                                 try:
-                                    ai_result = self.gemini_analyzer.analyze_image(tmp_path)
-                                    if ai_result and ai_result.get('title') and ai_result.get('description'):
-                                        title_value = ai_result['title'][:115].replace(":", ",")
-                                        desc_value = ai_result['description']
+                                    # Only generate title (faster and keeps existing description)
+                                    ai_title = self.gemini_analyzer.generate_title_only(tmp_path)
+                                    if ai_title:
+                                        title_value = ai_title[:115].replace(":", ",")
                                         
-                                        # Fill in the fields using the approach from the working script
+                                        # Fill in only the title field - keep existing description
                                         self.page.evaluate(f"""
                                             const titleField = document.querySelector('input#title');
-                                            const descField = document.querySelector('textarea#description');
                                             
                                             if (titleField) {{
                                                 titleField.focus();
@@ -834,16 +833,9 @@ class DreamstimeBot:
                                                 titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                                 titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
                                             }}
-                                            
-                                            if (descField) {{
-                                                descField.focus();
-                                                descField.value = {repr(desc_value)};
-                                                descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                            }}
                                         """)
                                         safe_wait(self.page, 1000, self.state.is_stop_requested)
-                                        self.log_progress(6, f"AI generated title: {title_value[:40]}...", "success")
+                                        self.log_progress(6, f"AI generated title: {title_value[:40]}... (keeping existing description)", "success")
                                 finally:
                                     import os
                                     try:
@@ -1053,11 +1045,11 @@ class DreamstimeBot:
             title_text = title_field.input_value()
             description_text = description_field.input_value()
             
-            # Skip if both are empty - use Gemini AI analysis
-            if not title_text.strip() and not description_text.strip():
-                self.log_progress(7, "Both title and description are empty - using Gemini AI...", "info")
+            # If title is empty, use Gemini AI to generate only title (optimized for speed)
+            if not title_text.strip():
+                self.log_progress(7, "Title is empty - using Gemini AI to generate title...", "info")
                 
-                # Try to use Gemini AI to analyze the image and generate content
+                # Try to use Gemini AI to generate only the title
                 if self.gemini_analyzer and self.gemini_analyzer.enabled:
                     try:
                         # Screenshot the visible image thumbnail to analyze
@@ -1074,37 +1066,31 @@ class DreamstimeBot:
                                 tmp_path = tmp_file.name
                             
                             try:
-                                # Use Gemini to analyze
-                                self.log_progress(7, "Analyzing image with Gemini AI...", "info")
-                                ai_result = self.gemini_analyzer.analyze_image(tmp_path)
+                                # Use Gemini to generate title only (faster!)
+                                self.log_progress(7, "Generating title with Gemini AI...", "info")
+                                ai_title = self.gemini_analyzer.generate_title_only(tmp_path)
                                 
-                                if ai_result:
-                                    # Fill in generated title and description using JavaScript
+                                if ai_title:
+                                    # Fill in generated title only - keep existing description
                                     self.page.evaluate(f"""
                                         const titleField = document.querySelector('input#title');
-                                        const descField = document.querySelector('textarea#description');
                                         
                                         if (titleField) {{
                                             titleField.focus();
-                                            titleField.value = {repr(ai_result['title'])};
+                                            titleField.value = {repr(ai_title)};
                                             titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                             titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                        }}
-                                        
-                                        if (descField) {{
-                                            descField.focus();
-                                            descField.value = {repr(ai_result['description'])};
-                                            descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                            descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
                                         }}
                                     """)
                                     safe_wait(self.page, 1000, self.state.is_stop_requested)
                                     
-                                    self.log_progress(7, f"AI generated: {ai_result['title'][:40]}...", "success")
-                                    title_text = ai_result['title']
-                                    description_text = ai_result['description']
+                                    self.log_progress(7, f"AI generated title: {ai_title[:40]}... (keeping existing description)", "success")
+                                    title_text = ai_title
+                                    # Keep existing description as is
+                                    if not description_text.strip():
+                                        description_text = "Stock image"  # Fallback if truly empty
                                 else:
-                                    self.log_progress(7, "Gemini analysis failed - skipping image", "warning")
+                                    self.log_progress(7, "Gemini title generation failed - skipping image", "warning")
                                     if self.same_id_action == "stop":
                                         return "stop"
                                     return "skip"

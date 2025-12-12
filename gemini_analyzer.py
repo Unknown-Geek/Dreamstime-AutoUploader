@@ -30,6 +30,52 @@ class GeminiImageAnalyzer:
             logger.error(f"Failed to initialize Gemini: {str(e)}")
             self.enabled = False
     
+    def generate_title_only(self, image_path):
+        """
+        Generate only a title for the image (optimized for speed)
+        
+        Args:
+            image_path: Path to the image file
+            
+        Returns:
+            str with title, or None if failed
+        """
+        if not self.enabled:
+            logger.warning("Gemini API not enabled, skipping analysis")
+            return None
+        
+        try:
+            # Load image
+            img = Image.open(image_path)
+            
+            # Prepare prompt for stock photography title only
+            prompt = """Analyze this image for stock photography submission. Generate ONLY a TITLE:
+
+Requirements:
+- Maximum 115 characters
+- Descriptive and SEO-friendly
+- Highlight main subject and key elements
+- Professional tone
+- No colons or special characters
+
+Format your response EXACTLY as:
+TITLE: [your title here]"""
+            
+            # Generate content
+            response = self.model.generate_content([prompt, img])
+            
+            # Parse response
+            title = self._parse_title_response(response.text)
+            
+            if title:
+                logger.info(f"Generated title: {title[:50]}...")
+            
+            return title
+            
+        except Exception as e:
+            logger.error(f"Failed to generate title: {str(e)}")
+            return None
+    
     def analyze_image(self, image_path):
         """
         Analyze an image and generate title and description
@@ -81,6 +127,29 @@ DESCRIPTION: [your description here]"""
             
         except Exception as e:
             logger.error(f"Failed to analyze image: {str(e)}")
+            return None
+    
+    def _parse_title_response(self, response_text):
+        """Parse Gemini response to extract title only"""
+        try:
+            lines = response_text.strip().split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if line.upper().startswith('TITLE:'):
+                    title = line.split(':', 1)[1].strip()
+                    # Remove any quotes or extra formatting
+                    title = title.strip('"\'')
+                    # Limit to 115 characters
+                    if len(title) > 115:
+                        title = title[:112] + '...'
+                    return title
+            
+            logger.warning("Could not parse title from Gemini response")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to parse Gemini title response: {str(e)}")
             return None
     
     def _parse_response(self, response_text):
