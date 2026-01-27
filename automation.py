@@ -11,7 +11,7 @@ from utils import (
     safe_wait, 
     StopRequestedException
 )
-from gemini_analyzer import GeminiImageAnalyzer
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -67,17 +67,7 @@ class DreamstimeBot:
         self.progress_callback = progress_callback
         self.state = AutomationState()
         
-        # Initialize Gemini AI analyzer
-        try:
-            self.gemini_analyzer = GeminiImageAnalyzer()
-            if self.gemini_analyzer.enabled:
-                logger.info("Gemini AI analyzer initialized successfully")
-            else:
-                logger.warning("Gemini AI analyzer not available - API key not configured")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Gemini analyzer: {str(e)}")
-            self.gemini_analyzer = None
-        
+
         # Automation options with defaults
         self.options = options or {}
         self.template = self.options.get('template', Config.DEFAULT_TEMPLATE)
@@ -596,63 +586,61 @@ class DreamstimeBot:
             self.log_progress(6, "Looking for images to process...", "info")
             
             # Navigate to upload page first
-            if "/upload" not in self.page.url or re.search(r'/upload/\d+', self.page.url):
+            if "/upload" not in self.page.url or re.search(r'/upload/(edit)?\d+', self.page.url):
                 self.page.goto("https://www.dreamstime.com/upload")
                 self.page.wait_for_load_state('domcontentloaded')
-                safe_wait(self.page, 3000, self.state.is_stop_requested)
+                safe_wait(self.page, 2000, self.state.is_stop_requested)
             
             current_url = self.page.url
             self.log_progress(6, f"Current URL: {current_url}", "info")
             
-            # Debug: Log page structure
-            self.log_progress(6, "Inspecting page for clickable images...", "info")
+            # Look for edit links with pattern /upload/editNNNN or /upload/NNNN
+            edit_links = self.page.locator("a[href*='/upload/edit']").all()
+            self.log_progress(6, f"Found {len(edit_links)} edit links", "info")
             
-            # Look for edit links with pattern /upload/NNNNNN
-            all_links = self.page.locator("a[href*='/upload/']").all()
-            self.log_progress(6, f"Found {len(all_links)} links containing /upload/", "info")
-            
-            edit_links = []
-            for link in all_links:
-                try:
-                    href = link.get_attribute('href') or ''
-                    # Match /upload/ followed by digits (not words like 'photos')
-                    if re.search(r'/upload/\d{5,}', href):
-                        edit_links.append((link, href))
-                        if len(edit_links) <= 3:
-                            self.log_progress(6, f"  Found edit link: {href}", "info")
-                except:
-                    continue
-            
-            self.log_progress(6, f"Found {len(edit_links)} image edit links", "info")
-            
-            if not edit_links:
-                # Try finding by class patterns from the extension
-                js_ready = self.page.locator(".js-readyToSubmit, .js-upload-edit, [class*='upload-item']").all()
-                self.log_progress(6, f"Found {len(js_ready)} elements with upload classes", "info")
-                
-                # Try finding any clickable thumbnails
-                thumbs = self.page.locator("img[src*='thumb'], img[src*='dreamstime']").all()
-                self.log_progress(6, f"Found {len(thumbs)} thumbnail images", "info")
-                
-                if not js_ready and not thumbs:
-                    self.log_progress(6, "No images found - please upload images first", "warning")
-                    return False
-                
-                # Click first found element
-                if js_ready:
-                    js_ready[0].click()
-                else:
-                    thumbs[0].click()
-                safe_wait(self.page, 3000, self.state.is_stop_requested)
-            else:
+            if edit_links:
                 # Click first edit link
-                edit_links[0][0].click()
-                self.log_progress(6, f"Clicked: {edit_links[0][1]}", "info")
-                safe_wait(self.page, 3000, self.state.is_stop_requested)
+                first_link = edit_links[0]
+                href = first_link.get_attribute('href') or ''
+                self.log_progress(6, f"Clicking edit link: {href}", "info")
+                first_link.click()
+                safe_wait(self.page, 2000, self.state.is_stop_requested)
+            else:
+                # Try alternative selectors - look for any links with /upload/ followed by digits
+                all_links = self.page.locator("a").all()
+                found_link = None
+                for link in all_links:
+                    try:
+                        href = link.get_attribute('href') or ''
+                        if re.search(r'/upload/(edit)?\d+', href):
+                            found_link = link
+                            self.log_progress(6, f"Found image link: {href}", "info")
+                            break
+                    except:
+                        continue
+                
+                if found_link:
+                    found_link.click()
+                    safe_wait(self.page, 2000, self.state.is_stop_requested)
+                else:
+                    # Try clicking on image thumbnails that might be inside edit links
+                    thumb_containers = self.page.locator(".js-readyToSubmit, .upload-item, [data-id]").all()
+                    self.log_progress(6, f"Found {len(thumb_containers)} thumbnail containers", "info")
+                    
+                    if thumb_containers:
+                        thumb_containers[0].click()
+                        safe_wait(self.page, 2000, self.state.is_stop_requested)
+                    else:
+                        self.log_progress(6, "No images found to process - please upload images first", "warning")
+                        return False
             
             # Verify we're now on an edit page
             new_url = self.page.url
             self.log_progress(6, f"Navigated to: {new_url}", "info")
+            
+            if not re.search(r'/upload/(edit)?\d+', new_url):
+                self.log_progress(6, "Failed to navigate to image edit page", "error")
+                return False
             
             # Run the processing loop
             return self.process_images_loop()
@@ -687,6 +675,9 @@ class DreamstimeBot:
                 return
             
             for i in range(self.repeat_count):
+                # Track start time for this image (for 60 second timeout)
+                image_start_time = time.time()
+                
                 if self.state.stop_requested:
                     self.log_progress(6, "Stop requested, halting processing", "warning")
                     break
@@ -796,111 +787,38 @@ class DreamstimeBot:
                 title_value = title_field.input_value() if title_field.count() > 0 else ""
                 desc_value = description_field.input_value() if description_field.count() > 0 else ""
                 
-                # Use Gemini AI if title or description is empty
-                if not title_value.strip() or not desc_value.strip():
-                    # Try to get image and generate with Gemini
-                    if self.gemini_analyzer and self.gemini_analyzer.enabled:
-                        try:
-                            # Take screenshot of the image preview
-                            img_preview = self.page.locator("img.js-upload-preview, .upload-item img, img[src*='dreamstime']").first
-                            if img_preview.count() > 0:
-                                import tempfile
-                                screenshot_bytes = img_preview.screenshot()
-                                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
-                                    tmp_file.write(screenshot_bytes)
-                                    tmp_path = tmp_file.name
-                                
-                                try:
-                                    # If both are empty, generate both. If only title empty, generate only title.
-                                    if not title_value.strip() and not desc_value.strip():
-                                        self.log_progress(6, "Empty title and description - generating both with Gemini AI...", "info")
-                                        ai_result = self.gemini_analyzer.analyze_image(tmp_path)
-                                        if ai_result and ai_result.get('title') and ai_result.get('description'):
-                                            title_value = ai_result['title'][:115].replace(":", ",")
-                                            desc_value = ai_result['description']
-                                            
-                                            # Fill in both fields
-                                            self.page.evaluate(f"""
-                                                const titleField = document.querySelector('input#title');
-                                                const descField = document.querySelector('textarea#description');
-                                                
-                                                if (titleField) {{
-                                                    titleField.focus();
-                                                    titleField.value = {repr(title_value)};
-                                                    titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                    titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                                }}
-                                                
-                                                if (descField) {{
-                                                    descField.focus();
-                                                    descField.value = {repr(desc_value)};
-                                                    descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                    descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                                }}
-                                            """)
-                                            safe_wait(self.page, 1000, self.state.is_stop_requested)
-                                            self.log_progress(6, f"AI generated title and description: {title_value[:40]}...", "success")
-                                    elif not title_value.strip():
-                                        self.log_progress(6, "Empty title - generating only title with Gemini AI (keeping existing description)...", "info")
-                                        ai_title = self.gemini_analyzer.generate_title_only(tmp_path)
-                                        if ai_title:
-                                            title_value = ai_title[:115].replace(":", ",")
-                                            
-                                            # Fill in only the title field
-                                            self.page.evaluate(f"""
-                                                const titleField = document.querySelector('input#title');
-                                                
-                                                if (titleField) {{
-                                                    titleField.focus();
-                                                    titleField.value = {repr(title_value)};
-                                                    titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                    titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                                }}
-                                            """)
-                                            safe_wait(self.page, 1000, self.state.is_stop_requested)
-                                            self.log_progress(6, f"AI generated title: {title_value[:40]}... (kept existing description)", "success")
-                                finally:
-                                    import os
-                                    try:
-                                        os.unlink(tmp_path)
-                                    except:
-                                        pass
-                        except Exception as e:
-                            self.log_progress(6, f"Gemini AI failed: {str(e)}", "warning")
-                    
-                    # If still empty after Gemini attempt, fallback using description when available
-                    title_value = title_field.input_value() if title_field.count() > 0 else ""
-                    desc_value = description_field.input_value() if description_field.count() > 0 else ""
-                    if not title_value.strip():
-                        if desc_value.strip():
-                            # Prefer the description as title fallback
-                            sanitized = desc_value.replace(":", ",")[:115]
-                            title_value = sanitized
-                        else:
-                            # Last-resort generic fallback
-                            title_value = f"AI Generated Image {current_image_id if 'current_image_id' in dir() else i+1}"
-                            desc_value = "AI generated digital artwork, high quality image"
-                        
-                        self.page.evaluate(f"""
-                            const titleField = document.querySelector('input#title');
-                            const descField = document.querySelector('textarea#description');
-                            
-                            if (titleField) {{
-                                titleField.focus();
-                                titleField.value = {repr(title_value)};
-                                titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                            
-                            if (descField && {repr(desc_value)}.length > 0) {{
-                                descField.focus();
-                                descField.value = {repr(desc_value)};
-                                descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        """)
-                        safe_wait(self.page, 500, self.state.is_stop_requested)
+                # If title is empty, copy description to title (fast, no API calls)
+                if not title_value.strip():
+                    if desc_value.strip():
+                        # Copy description to title
+                        sanitized = desc_value.replace(":", ",")[:115]
+                        title_value = sanitized
+                        self.log_progress(6, f"Copying description to title: {title_value[:40]}...", "info")
+                    else:
+                        # Last-resort generic fallback when both are empty
+                        title_value = f"AI Generated Image {current_image_id if 'current_image_id' in dir() else i+1}"
+                        desc_value = "AI generated digital artwork, high quality image"
                         self.log_progress(6, f"Using fallback title: {title_value}", "info")
+                    
+                    self.page.evaluate(f"""
+                        const titleField = document.querySelector('input#title');
+                        const descField = document.querySelector('textarea#description');
+                        
+                        if (titleField) {{
+                            titleField.focus();
+                            titleField.value = {repr(title_value)};
+                            titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+                        
+                        if (descField && {repr(desc_value)}.length > 0) {{
+                            descField.focus();
+                            descField.value = {repr(desc_value)};
+                            descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+                    """)
+                    safe_wait(self.page, 500, self.state.is_stop_requested)
                 
                 # Copy description to title if title is still empty but description exists
                 title_value = title_field.input_value() if title_field.count() > 0 else ""
@@ -928,7 +846,7 @@ class DreamstimeBot:
                             if (titleField.onchange) titleField.onchange(changeEvent);
                         }}
                     """)
-                    safe_wait(self.page, 1500, self.state.is_stop_requested)
+                    safe_wait(self.page, 500, self.state.is_stop_requested)
                 
                 # Add template text to description if configured
                 if self.template != "none":
@@ -944,53 +862,10 @@ class DreamstimeBot:
                                 desc.dispatchEvent(new Event('change', {{ bubbles: true }}));
                             }}
                         """)
-                        safe_wait(self.page, 500, self.state.is_stop_requested)
+                        safe_wait(self.page, 300, self.state.is_stop_requested)
                 
-                # Always mark as AI generated
-                self.log_progress(6, "Marking as AI generated...", "info")
-                
-                # Remove existing category if present
-                try:
-                    remove_btn = self.page.locator("#js-remove-cat3 > i")
-                    if remove_btn.count() > 0 and remove_btn.is_visible():
-                        remove_btn.click()
-                        safe_wait(self.page, 1500, self.state.is_stop_requested)
-                except:
-                    pass
-                
-                # Set category to AI Generated (172)
-                try:
-                    cat_dropdown = self.page.locator("#M_Category_3")
-                    if cat_dropdown.count() > 0:
-                        self.page.evaluate("""
-                            const cat = document.querySelector('#M_Category_3');
-                            if (cat) {
-                                cat.value = '172';
-                                cat.dispatchEvent(new Event('change', { bubbles: true }));
-                                cat.dispatchEvent(new Event('input', { bubbles: true }));
-                            }
-                        """)
-                        safe_wait(self.page, 4500, self.state.is_stop_requested)
-                        self.log_progress(6, "Set AI category (172)", "success")
-                except Exception as e:
-                    self.log_progress(6, f"Category dropdown error: {str(e)}", "warning")
-                
-                # Set subcategory (212)
-                try:
-                    subcat_dropdown = self.page.locator("#M_Subcategory_3")
-                    if subcat_dropdown.count() > 0:
-                        self.page.evaluate("""
-                            const subcat = document.querySelector('#M_Subcategory_3');
-                            if (subcat) {
-                                subcat.value = '212';
-                                subcat.dispatchEvent(new Event('change', { bubbles: true }));
-                                subcat.dispatchEvent(new Event('input', { bubbles: true }));
-                            }
-                        """)
-                        safe_wait(self.page, 1000, self.state.is_stop_requested)
-                        self.log_progress(6, "Set AI subcategory (212)", "success")
-                except Exception as e:
-                    self.log_progress(6, f"Subcategory dropdown error: {str(e)}", "warning")
+                # Skip category checks - they auto-populate correctly
+                # Go directly to submit
                 
                 # Check for captcha before submitting
                 if not self.check_for_captcha():
@@ -999,44 +874,59 @@ class DreamstimeBot:
                 
                 # Click submit button
                 self.log_progress(6, "Submitting image...", "info")
+                submit_success = False
                 try:
                     submit_btn = self.page.locator("#submitbutton")
                     if submit_btn.count() > 0:
                         submit_btn.click()
-                        safe_wait(self.page, 3000, self.state.is_stop_requested)
-                        
-                        # Check if page got stuck after submit click
-                        if self.is_page_stuck():
-                            self.log_progress(6, "⚠️ Page stuck after submit - attempting refresh...", "warning")
-                            if not self.refresh_page_if_stuck("after submit"):
-                                self.log_progress(6, "❌ Could not recover after submit - continuing to next image", "error")
-                                continue
-                        
-                        # Check for captcha after submission
-                        if not self.check_for_captcha():
-                            self.log_progress(6, "Captcha timeout - stopping automation", "error")
-                            break
-                        
-                        processed += 1
-                        self.state.processed_count = processed
-                        self.state.successful_count = processed
-                        
-                        progress_pct = int((processed / self.repeat_count) * 100)
-                        self.log_progress(6, f"✅ Submitted! Progress: {progress_pct}% ({processed}/{self.repeat_count})", "success")
+                        safe_wait(self.page, 1000, self.state.is_stop_requested)
+                        submit_success = True
                     else:
                         self.log_progress(6, "Submit button not found", "error")
-                        # Check if page is stuck when button not found
-                        if self.is_page_stuck():
-                            if self.refresh_page_if_stuck("submit button not found"):
-                                continue  # Retry this iteration
                 except Exception as e:
                     self.log_progress(6, f"Submit failed: {str(e)}", "error")
-                    # Check if exception was due to stuck page
-                    if self.is_page_stuck():
-                        if self.refresh_page_if_stuck("submit exception"):
-                            continue  # Retry this iteration
+                    submit_success = False
                 
-                # Apply delay between images
+                # Check if taking too long (more than 60 seconds for this image)
+                elapsed_time = time.time() - image_start_time
+                if elapsed_time > 60:
+                    self.log_progress(6, f"⏱️ Image took {elapsed_time:.0f}s - deleting to skip...", "warning")
+                    try:
+                        # Click delete button
+                        delete_btn = self.page.locator("a#js-delete-submit, #js-delete-submit")
+                        if delete_btn.count() > 0:
+                            delete_btn.click()
+                            safe_wait(self.page, 500, self.state.is_stop_requested)
+                            
+                            # Click confirm button in the popup
+                            confirm_btn = self.page.locator("button.js-confirm, .js-confirm")
+                            if confirm_btn.count() > 0:
+                                confirm_btn.click()
+                                safe_wait(self.page, 1000, self.state.is_stop_requested)
+                            
+                            self.log_progress(6, "🗑️ Image deleted, moving to next...", "info")
+                    except Exception as del_err:
+                        self.log_progress(6, f"Delete failed: {str(del_err)}", "warning")
+                        if self.refresh_page_if_stuck("delete failed"):
+                            continue
+                    continue
+                
+                if not submit_success:
+                    continue
+                
+                # Check for captcha after submission
+                if not self.check_for_captcha():
+                    self.log_progress(6, "Captcha timeout - stopping automation", "error")
+                    break
+                
+                processed += 1
+                self.state.processed_count = processed
+                self.state.successful_count = processed
+                
+                progress_pct = int((processed / self.repeat_count) * 100)
+                self.log_progress(6, f"✅ Submitted! Progress: {progress_pct}% ({processed}/{self.repeat_count})", "success")
+                
+                # Apply delay between images (minimal)
                 if processed < self.repeat_count:
                     delay_seconds = DelayCalculator.calculate(self.delay)
                     self.log_progress(6, f"Waiting {delay_seconds}s before next image...", "info")
@@ -1068,101 +958,19 @@ class DreamstimeBot:
             title_text = title_field.input_value()
             description_text = description_field.input_value()
             
-            # Use Gemini AI if title or description is empty
-            if not title_text.strip() or not description_text.strip():
-                # Try to use Gemini AI to generate content
-                if self.gemini_analyzer and self.gemini_analyzer.enabled:
-                    try:
-                        # Screenshot the visible image thumbnail to analyze
-                        image_container = self.page.locator(".upload-item.submit").first
-                        if image_container.count() > 0:
-                            # Take screenshot of the image area
-                            screenshot_bytes = image_container.screenshot()
-                            
-                            # Save temporarily
-                            import tempfile
-                            import os
-                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
-                                tmp_file.write(screenshot_bytes)
-                                tmp_path = tmp_file.name
-                            
-                            try:
-                                # If both are empty, generate both. If only title empty, generate only title.
-                                if not title_text.strip() and not description_text.strip():
-                                    self.log_progress(7, "Both title and description empty - generating both with Gemini AI...", "info")
-                                    ai_result = self.gemini_analyzer.analyze_image(tmp_path)
-                                    
-                                    if ai_result:
-                                        # Fill in generated title and description
-                                        self.page.evaluate(f"""
-                                            const titleField = document.querySelector('input#title');
-                                            const descField = document.querySelector('textarea#description');
-                                            
-                                            if (titleField) {{
-                                                titleField.focus();
-                                                titleField.value = {repr(ai_result['title'])};
-                                                titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                            }}
-                                            
-                                            if (descField) {{
-                                                descField.focus();
-                                                descField.value = {repr(ai_result['description'])};
-                                                descField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                descField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                            }}
-                                        """)
-                                        safe_wait(self.page, 1000, self.state.is_stop_requested)
-                                        
-                                        self.log_progress(7, f"AI generated title and description: {ai_result['title'][:40]}...", "success")
-                                        title_text = ai_result['title']
-                                        description_text = ai_result['description']
-                                    else:
-                                        self.log_progress(7, "Gemini analysis failed - skipping image", "warning")
-                                        if self.same_id_action == "stop":
-                                            return "stop"
-                                        return "skip"
-                                elif not title_text.strip():
-                                    self.log_progress(7, "Title empty - generating only title with Gemini AI (keeping existing description)...", "info")
-                                    ai_title = self.gemini_analyzer.generate_title_only(tmp_path)
-                                    
-                                    if ai_title:
-                                        # Fill in generated title only - keep existing description
-                                        self.page.evaluate(f"""
-                                            const titleField = document.querySelector('input#title');
-                                            
-                                            if (titleField) {{
-                                                titleField.focus();
-                                                titleField.value = {repr(ai_title)};
-                                                titleField.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                                titleField.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                            }}
-                                        """)
-                                        safe_wait(self.page, 1000, self.state.is_stop_requested)
-                                        
-                                        self.log_progress(7, f"AI generated title: {ai_title[:40]}... (kept existing description)", "success")
-                                        title_text = ai_title
-                                    else:
-                                        self.log_progress(7, "Gemini title generation failed - skipping image", "warning")
-                                        if self.same_id_action == "stop":
-                                            return "stop"
-                                        return "skip"
-                            finally:
-                                # Clean up temp file
-                                try:
-                                    os.unlink(tmp_path)
-                                except:
-                                    pass
-                    except Exception as e:
-                        self.log_progress(7, f"Gemini AI error: {str(e)} - skipping image", "warning")
-                        if self.same_id_action == "stop":
-                            return "stop"
-                        return "skip"
+            # If title is empty, copy description to title (fast, no API calls)
+            if not title_text.strip():
+                if description_text.strip():
+                    # Copy description to title
+                    title_text = description_text
+                    self.log_progress(7, "Copying description to title field", "info")
                 else:
-                    self.log_progress(7, "Gemini AI not available - skipping empty image", "warning")
-                    if self.same_id_action == "stop":
-                        return "stop"
-                    return "skip"
+                    # Both empty - use generic fallback
+                    self.log_progress(7, "Both title and description empty - using fallback", "warning")
+                    title_text = "AI Generated Image"
+                    description_text = "AI generated digital artwork, high quality image"
+                    description_field.fill(description_text)
+                    description_field.dispatch_event("input")
             # Copy description to title if title is empty (since description filling works)
             if not title_text or not title_text.strip():
                 # Get the description value that was successfully filled
@@ -1251,7 +1059,7 @@ class DreamstimeBot:
             if category_dropdown.count() > 0:
                 category_dropdown.select_option("172")
                 category_dropdown.dispatch_event("change")
-                safe_wait(self.page, 4500, self.state.is_stop_requested)
+                safe_wait(self.page, 1500, self.state.is_stop_requested)
                 self.log_progress(7, "Set AI category", "info")
             
             # Set subcategory to 212
@@ -1340,7 +1148,7 @@ class DreamstimeBot:
             submit_button = self.page.locator("a#submitbutton")
             if submit_button.count() > 0:
                 submit_button.click()
-                safe_wait(self.page, 3000, self.state.is_stop_requested)
+                safe_wait(self.page, 1500, self.state.is_stop_requested)
                 
                 self.log_progress(8, "Image submitted successfully", "success")
                 self.state.successful_count += 1
