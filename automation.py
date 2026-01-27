@@ -211,37 +211,32 @@ class DreamstimeBot:
         """
         try:
             self.log_progress(-1, "🔄 Trying keyboard bypass (Tab + Enter hold)...", "info")
-            
-            # Small delay before starting
             time.sleep(0.5)
-            
-            # Press Tab ONCE to focus on the Press & Hold button
             self.page.keyboard.press('Tab')
             self.log_progress(-1, "📍 Pressed Tab to focus on button", "info")
-            
-            # Small delay before pressing Enter (like a human would)
             time.sleep(0.3)
-            
-            # Hold Enter key for 8 seconds
-            self.log_progress(-1, "⏳ Holding Enter for 8 seconds...", "info")
+
+            max_hold = 15.0  # seconds
+            check_interval = 0.5  # seconds
+            elapsed = 0.0
+            self.log_progress(-1, f"⏳ Holding Enter for up to {max_hold} seconds or until captcha is solved...", "info")
             self.page.keyboard.down('Enter')
-            time.sleep(8.0)
+            solved = False
+            while elapsed < max_hold:
+                time.sleep(check_interval)
+                elapsed += check_interval
+                # Check if captcha is solved (page title no longer contains denied/blocked)
+                page_title = self.page.title()
+                if "denied" not in page_title.lower() and "blocked" not in page_title.lower():
+                    solved = True
+                    break
             self.page.keyboard.up('Enter')
-            
-            self.log_progress(-1, "✅ Released Enter key, waiting for page response...", "info")
-            
-            # Wait for page to process and potentially redirect
-            time.sleep(3.0)
-            
-            # Check page title to see if bypass worked
-            page_title = self.page.title()
-            if "denied" in page_title.lower() or "blocked" in page_title.lower():
-                self.log_progress(-1, f"❌ Still blocked (title: {page_title})", "warning")
+            if solved:
+                self.log_progress(-1, f"🎉 CAPTCHA bypassed after holding for {elapsed:.1f} seconds! New title: {page_title}", "success")
+                return True
+            else:
+                self.log_progress(-1, f"❌ Still blocked after {max_hold} seconds (title: {page_title})", "warning")
                 return False
-            
-            self.log_progress(-1, f"🎉 CAPTCHA bypassed! New title: {page_title}", "success")
-            return True
-            
         except Exception as e:
             self.log_progress(-1, f"Error during captcha bypass: {str(e)}", "warning")
             return False
